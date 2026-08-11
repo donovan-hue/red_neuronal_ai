@@ -1,3 +1,3 @@
-gunicorn==26.0.0
-numpy @ file:///home/builder/.termux-build/python-numpy/src/dist/numpy-2.4.4-cp314-cp314-android_arm.whl#sha256=5d5083b041c844e526bfc83a486b29d3683a78d0e28745874132ed1cc68c1271
-packaging==26.3
+flask
+gunicorn
+numpy
