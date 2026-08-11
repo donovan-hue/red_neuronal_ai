@@ -1,4 +1,5 @@
 import numpy as np
+import pickle
 
 class RedNeuronal:
     def __init__(self, input_size, hidden_size, output_size):
@@ -32,3 +33,12 @@ class RedNeuronal:
             self.b2 += np.sum(d_output, axis=0, keepdims=True) * lr
             self.W1 += X.T.dot(d_hidden) * lr
             self.b1 += np.sum(d_hidden, axis=0, keepdims=True) * lr
+
+    def guardar(self, filename="modelo.pkl"):
+        with open(filename, "wb") as f:
+            pickle.dump(self, f)
+
+    @staticmethod
+    def cargar(filename="modelo.pkl"):
+        with open(filename, "rb") as f:
+            return pickle.load(f)
