@@ -1,0 +1,90 @@
+{
+  "_comment": "Configuracion unica del sistema. Edita aqui; nada esta hardcodeado en el codigo.",
+  "provider": "auto",
+  "_provider_help": "auto = usa API frontier si hay clave en entorno, si no, motor local entrenado aqui. Forzar: local | openai | anthropic | gemini",
+  "providers": {
+    "openai": {
+      "base_url": "https://api.openai.com/v1",
+      "model": "gpt-4o-mini",
+      "key_env": "OPENAI_API_KEY",
+      "kind": "openai"
+    },
+    "anthropic": {
+      "base_url": "https://api.anthropic.com/v1",
+      "model": "claude-sonnet-4-0",
+      "key_env": "ANTHROPIC_API_KEY",
+      "kind": "anthropic"
+    },
+    "gemini": {
+      "base_url": "https://generativelanguage.googleapis.com/v1beta",
+      "model": "gemini-2.0-flash",
+      "key_env": "GEMINI_API_KEY",
+      "kind": "gemini"
+    }
+  },
+  "model": {
+    "name": "nexus-1",
+    "vocab_size": 8192,
+    "block_size": 256,
+    "d_model": 320,
+    "n_layers": 4,
+    "n_heads": 8,
+    "ff_mult": 2.8,
+    "dropout": 0.0,
+    "params_dir": "models",
+    "n_kv": 4
+  },
+  "train": {
+    "batch_size": 8,
+    "steps": 3500,
+    "lr": 0.0006,
+    "min_lr": 6e-05,
+    "warmup": 150,
+    "weight_decay": 0.1,
+    "beta1": 0.9,
+    "beta2": 0.95,
+    "grad_clip": 1.0,
+    "eval_every": 100,
+    "eval_batches": 20,
+    "log_every": 25,
+    "threads": 2,
+    "log_file": "runs/train.jsonl",
+    "ckpt": "models/nexus-1.pt"
+  },
+  "data": {
+    "dir": "data",
+    "out": "data/tokens",
+    "min_doc_chars": 600,
+    "synth_share": 0.18,
+    "synth_samples": 26000,
+    "seed": 20261021
+  },
+  "agent": {
+    "max_steps": 6,
+    "temperature": 0.6,
+    "top_p": 0.92,
+    "max_tokens": 320,
+    "self_consistency": 3,
+    "verify": true,
+    "reflect": true,
+    "memory_db": "models/memory.sqlite",
+    "trajectory_exemplars": 2,
+    "guard": true,
+    "compact_prompt": "auto"
+  },
+  "rag": {
+    "chunk_chars": 900,
+    "overlap": 120,
+    "top_k": 4,
+    "index": "models/rag_index.npz"
+  },
+  "eval": {
+    "suite": "nexus-bench-v1",
+    "items_per_task": 40,
+    "report": "runs/eval_report.json"
+  },
+  "server": {
+    "host": "0.0.0.0",
+    "port": 8080
+  }
+}
