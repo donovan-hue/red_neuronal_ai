@@ -70,3 +70,6 @@ modelo frontier para comparar arquitecturas en igualdad de condiciones.
   a usuarios: contenedor sin red, allow-list de herramientas y límite de gasto por sesión.
 - Conocimiento = corpus literario descargado, no un índice factual. El RAG responde de
   Quijote, Holmes o Frankenstein, no de la actualidad.
+
+## Artefactos entrenados
+No van en el arbol de git. Descargarlos: `bash nexus/get_model.sh` (Release v0.1, sha256 verificado).
