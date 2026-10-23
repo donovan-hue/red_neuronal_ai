@@ -85,26 +85,28 @@ function md(t){const d=document.createElement('div');d.textContent=t;return d.in
 function bub(cls,txt){const d=document.createElement('div');d.className='msg '+cls;d.innerHTML=txt;log().appendChild(d);log().scrollTop=1e9;return d;}
 function send(){
   const q=$('#q').value.trim();if(!q||BUSY)return;$('#q').value='';BUSY=true;$('#s').disabled=true;
-  bub('me',md(q));HIST.push({role:'user',content:q});
+  bub('me',md(q));const priorHistory=HIST.slice(-6);
   const ai=bub('ai','<div class="trace">planeando…</div><div class="body"><span class="cur"></span></div>');
   const tr=ai.querySelector('.trace'),bd=ai.querySelector('.body');tr.innerHTML='';
-  let acc='';
-  fetch('/api/chat',{method:'POST',headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({message:q,history:HIST.slice(-6)})}).then(r=>{
+  let acc='',apiToken=sessionStorage.getItem('nexusApiToken')||'';
+  fetch('/api/chat',{method:'POST',headers:{'Content-Type':'application/json','X-Nexus-Api-Token':apiToken},
+    body:JSON.stringify({message:q,history:priorHistory})}).then(async r=>{
+    if(r.status===401){apiToken=prompt('Token de acceso NEXUS:')||'';if(apiToken)sessionStorage.setItem('nexusApiToken',apiToken);r=await fetch('/api/chat',{method:'POST',headers:{'Content-Type':'application/json','X-Nexus-Api-Token':apiToken},body:JSON.stringify({message:q,history:priorHistory})});}
+    if(!r.ok){const e=await r.json().catch(()=>({error:r.statusText}));throw new Error(e.error||r.statusText);}
     const rd=r.body.getReader();const dec=new TextDecoder();let buf='';
     function pump(){return rd.read().then(({done,value})=>{
       if(done)return;buf+=dec.decode(value,{stream:true});let i;
       while((i=buf.indexOf('\n\n'))>=0){const raw=buf.slice(0,i).trim();buf=buf.slice(i+2);
         if(!raw.startsWith('data:'))continue;let e;try{e=JSON.parse(raw.slice(5));}catch(_){continue;}
         if(e.type==='start'){setEng(e.engine);}
-        else if(e.type==='tool'){const a=document.createElement('div');a.innerHTML='<span class="t">▸ '+e.tool+'</span> '+md(JSON.stringify(e.args||{}))+'<pre>'+md(String(e.obs||'').slice(0,420))+'</pre>';tr.appendChild(a);log().scrollTop=1e9;}
+        else if(e.type==='tool'){const a=document.createElement('div');a.innerHTML='<span class="t">▸ '+md(String(e.tool||''))+'</span> '+md(JSON.stringify(e.args||{}))+'<pre>'+md(String(e.obs||'').slice(0,420))+'</pre>';tr.appendChild(a);log().scrollTop=1e9;}
         else if(e.type==='candidate'){const a=document.createElement('div');a.innerHTML='<span class="t">◇ muestra '+e.i+'</span> '+md(String(e.answer||'').slice(0,90));tr.appendChild(a);}
         else if(e.type==='meta'){tr.innerHTML='<span class="t">· motor</span> '+(e.engine&&e.engine.kind)+' · k='+e.k+'<br>';}
         else if(e.type==='token'){acc+=e.text;bd.innerHTML=md(acc)+'<span class="cur"></span>';log().scrollTop=1e9;}
         else if(e.type==='done'){
-          HIST.push({role:'assistant',content:e.answer});
+          HIST.push({role:'user',content:q},{role:'assistant',content:e.answer});
           const okc=e.verify_ok?'vok':'vbad';
-          const src=(e.sources||[]).slice(0,2).map(x=>`<div class="note" style="margin-top:5px">▣ ${x.src} (${x.score}) · ${x.text.slice(0,150)}…</div>`).join('');
+          const src=(e.sources||[]).slice(0,2).map(x=>`<div class="note" style="margin-top:5px">▣ ${md(String(x.src||''))} (${md(String(x.score||''))}) · ${md(String(x.text||'').slice(0,150))}…</div>`).join('');
           bd.innerHTML=md(e.answer||'(sin respuesta)')+src+'<div class="vb '+okc+'">'+(e.verify_ok?'✓ verificado':'⚠ verificador pidió revisión')+' · votos '+(e.votes||1)+'/'+(e.k||1)+'</div>'
             +(e.verify_note?'<div class="note" style="margin-top:4px">'+md(e.verify_note)+'</div>':'');
           log().scrollTop=1e9;status();}
@@ -115,7 +117,7 @@ function send(){
 }
 $('#s').onclick=send;$('#q').onkeydown=e=>{if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();send();}};
 $('#r').onclick=()=>{log().innerHTML='';HIST.length=0;};
-function setEng(x){if(!x)return;$('#p-eng').innerHTML='motor: <b>'+(x.kind==='local'?'local '+x.params_M+'M':x.provider+' · '+x.model)+'</b>';}
+function setEng(x){if(!x)return;$('#p-eng').innerHTML='motor: <b>'+md(x.kind==='local'?'local '+x.params_M+'M':x.provider+' · '+x.model)+'</b>';}
 let LOSS=[];
 function draw(){const c=$('#loss'),g=c.getContext('2d');g.clearRect(0,0,c.width,c.height);
   if(!LOSS.length)return;const v=LOSS.map(p=>p.val??p.train).filter(Number.isFinite);
@@ -126,27 +128,34 @@ function draw(){const c=$('#loss'),g=c.getContext('2d');g.clearRect(0,0,c.width,
   g.fillText('val '+v[v.length-1].toFixed(3),8,13);g.fillText('min '+mn.toFixed(3),c.width-88,13);}
 function renderSt(s){
   const t=s.train||{},last=t.last||{},bits=[];
-  bits.push(['proveedor',s.provider]);
-  bits.push(['checkpoint',t.steps_done+' pasos']);
+  bits.push(['proveedor',md(String(s.provider||''))]);
+  bits.push(['checkpoint',md(String(t.steps_done)+' pasos')]);
   bits.push(['loss val',last.val?last.val.toFixed(3):'—']);
   bits.push(['perplejidad',last.val?Math.exp(last.val).toFixed(1):'—']);
-  bits.push(['documentos',s.docs_indexed]);
-  bits.push(['parametros',s.engine?s.engine.params_M||'—':'—']);
+  bits.push(['documentos',md(String(s.docs_indexed??0))]);
+  bits.push(['parametros',md(String(s.engine?s.engine.params_M||'—':'—'))]);
   $('#st').innerHTML=bits.map(([k,v])=>`<div class="kv"><span>${k}</span><b>${v??'—'}</b></div>`).join('');
   if(t.steps_done!=null)$('#p-step').innerHTML='entrenado: <b>'+t.steps_done+' pasos</b>';
   $('#p-docs').innerHTML='corpus: <b>'+(s.docs_indexed||0)+' frags</b>';
   LOSS=t.curve||[];draw();
-  if(s.error)$('#st').innerHTML+='<div class="warn" style="margin-top:8px">'+s.error+'</div>';
+  if(s.error)$('#st').innerHTML+='<div class="warn" style="margin-top:8px">'+md(String(s.error))+'</div>';
+  $('#b-train').disabled=!s.admin_enabled;$('#b-eval').disabled=!s.admin_enabled;
   if(s.eval){const r=s.eval.results||{};const arms=Object.keys(r);
     $('#ev').innerHTML='<table><tr><th>brazo</th><th>exactitud</th><th></th></tr>'+arms.map(a=>{
-      const x=r[a];return `<tr><td>${a}</td><td><b>${(x.acc*100).toFixed(1)}%</b> <span style="color:#7b879c">${x.ok}/${x.n}</span></td><td style="width:88px"><div class="bar"><i style="width:${(x.acc*100).toFixed(0)}%"></i></div></td></tr>`;}).join('')+'</table>'+
+      const x=r[a];return `<tr><td>${md(String(a))}</td><td><b>${(x.acc*100).toFixed(1)}%</b> <span style="color:#7b879c">${Number(x.ok)||0}/${Number(x.n)||0}</span></td><td style="width:88px"><div class="bar"><i style="width:${(x.acc*100).toFixed(0)}%"></i></div></td></tr>`;}).join('')+'</table>'+
       '<div class="note" style="margin-top:7px">semilla '+s.eval.seed+' · '+arms.length+' brazos · motor '+(s.eval.engine&&s.eval.engine.kind)+'</div>';}
 }
 function status(){fetch('/api/status').then(r=>r.json()).then(renderSt).catch(()=>{});}
-$('#b-eval').onclick=()=>{fetch('/api/eval',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});
-  $('#ev').innerHTML='<div class="note">corriendo… mira runs/eval.log</div>';setTimeout(status,4000);};
-$('#b-train').onclick=()=>{fetch('/api/train',{method:'POST',body:'{}'});setTimeout(status,3000);};
+async function adminPost(path,payload){
+  let token=sessionStorage.getItem('nexusAdminToken');
+  if(!token){token=prompt('Token administrativo NEXUS:');if(!token)return;sessionStorage.setItem('nexusAdminToken',token);}
+  const r=await fetch(path,{method:'POST',headers:{'Content-Type':'application/json','X-Nexus-Admin-Token':token},body:JSON.stringify(payload||{})});
+  if(!r.ok){sessionStorage.removeItem('nexusAdminToken');const e=await r.json().catch(()=>({error:r.statusText}));alert(e.error||'Operación rechazada');return false;}
+  return true;
+}
+$('#b-eval').onclick=async()=>{if(await adminPost('/api/eval',{})){$('#ev').innerHTML='<div class="note">Evaluación iniciada.</div>';setTimeout(status,4000);}};
+$('#b-train').onclick=async()=>{if(await adminPost('/api/train',{additional_steps:300}))setTimeout(status,3000);};
 $('#b-cfg').onclick=()=>fetch('/api/config').then(r=>r.text()).then(t=>{
-  $('#ev').innerHTML='<pre style="white-space:pre-wrap;font-size:11px;max-height:260px;overflow:auto;margin:0">'+t.replace(/</g,'&lt;')+'</pre>';});
+  $('#ev').innerHTML='<pre style="white-space:pre-wrap;font-size:11px;max-height:260px;overflow:auto;margin:0">'+md(t)+'</pre>';});
 status();setInterval(status,8000);
 </script></body></html>

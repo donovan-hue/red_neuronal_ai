@@ -1,1 +1,7 @@
 __pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+.nexus_memory.sqlite
+*.sqlite-shm
+*.sqlite-wal

@@ -43,7 +43,7 @@ class LocalEngine:
         self.lock = threading.Lock()
     def _ids(self, text):
         return self.tok.encode(text)
-    def complete(self, prompt, max_new=320, temperature=0.6, top_k=200, top_p=0.92, stop=None):
+    def complete(self, prompt, max_new=320, temperature=0.6, top_k=200, top_p=0.92, stop=None, messages=None):
         torch = self.torch
         ids = self._ids(prompt)
         ids = torch.tensor([ids[-self.block * 3:]], dtype=torch.long)
@@ -57,23 +57,31 @@ class LocalEngine:
                 i = txt.find(s)
                 if i >= 0: txt = txt[:i]
         return txt.strip()
-    @torch.no_grad() if False else (lambda f: f)
     def choice(self, prompt, options):
-        """Enruta por verosimilitud real del modelo: que prefiere a continuacion.
-
-        No es un if heuristico: comparamos la probabilidad del primer token de cada
-        continuation posible. Devuelve [(opcion, logprob), ...].
-        """
+        """Compara log-probabilidad de la secuencia completa de cada continuación."""
         import torch
-        ids = self._ids(prompt)[-self.block * 2:]
-        x = torch.tensor([ids], dtype=torch.long)
-        logits, _ = self.model(x)
-        lp = torch.log_softmax(logits[0, -1].float(), dim=-1)
+        context = self._ids(prompt)[-self.block + 1:]
+        if not context:
+            return []
         out = []
-        for o in options:
-            tid = self._ids(o)[0] if self._ids(o) else 0
-            out.append((o, float(lp[tid].detach())))
-        return sorted(out, key=lambda t: -t[1])
+        with self.lock, torch.no_grad():
+            for option in options:
+                continuation = self._ids(option)
+                if not continuation:
+                    out.append((option, float("-inf")))
+                    continue
+                combined = (context + continuation)[:self.block]
+                if len(combined) <= len(context):
+                    out.append((option, float("-inf")))
+                    continue
+                x = torch.tensor([combined], dtype=torch.long)
+                logits, _ = self.model(x)
+                log_probs = torch.log_softmax(logits[0].float(), dim=-1)
+                score = 0.0
+                for i, token_id in enumerate(continuation[:len(combined) - len(context)]):
+                    score += float(log_probs[len(context) - 1 + i, token_id])
+                out.append((option, score))
+        return sorted(out, key=lambda item: -item[1])
 
     def stream(self, prompt, **kw):
         # el modelo local es pequeno: generamos y vertemos en trozos (mismo contrato que la API)
@@ -97,34 +105,70 @@ class APIEngine:
             raise RuntimeError("no hay clave de API en el entorno")
         self.p = prov[self.name]
         self.key = os.environ.get(self.p["key_env"])
-    def _payload(self, messages, max_new, temperature):
+    def _payload(self, messages, max_new, temperature, stop=None):
         k = self.p["kind"]
         if k == "openai":
-            return f"{self.p['base_url']}/chat/completions", {"model": self.p["model"], "messages": messages,
-                    "max_tokens": max_new, "temperature": temperature}, {"Authorization": f"Bearer {self.key}"}
+            body = {"model": self.p["model"], "messages": messages,
+                    "max_tokens": max_new, "temperature": temperature}
+            if stop:
+                body["stop"] = stop
+            return f"{self.p['base_url']}/chat/completions", body, {"Authorization": f"Bearer {self.key}"}
         if k == "anthropic":
             sysmsg = " ".join(m["content"] for m in messages if m["role"] == "system")
             rest = [m for m in messages if m["role"] != "system"]
-            return f"{self.p['base_url']}/messages", {"model": self.p["model"], "system": sysmsg or None,
-                    "messages": rest, "max_tokens": max_new, "temperature": temperature}, \
-                   {"x-api-key": self.key, "anthropic-version": "2023-06-01"}
-        return (f"{self.p['base_url']}/models/{self.p['model']}:generateContent?key={self.key}",
-                {"contents": [{"role": "user" if m["role"] != "assistant" else "model",
-                               "parts": [{"text": m["content"]}]} for m in messages],
-                 "generationConfig": {"maxOutputTokens": max_new, "temperature": temperature}}, {})
-    def complete(self, prompt, max_new=600, temperature=0.4, top_k=None, top_p=None, stop=None, messages=None):
-        msgs = messages or [{"role": "user", "content": prompt}]
-        url, body, hdr = self._payload(msgs, max_new, temperature)
+            body = {"model": self.p["model"], "system": sysmsg or None,
+                    "messages": rest, "max_tokens": max_new, "temperature": temperature}
+            if stop:
+                body["stop_sequences"] = stop
+            return f"{self.p['base_url']}/messages", body, {"x-api-key": self.key, "anthropic-version": "2023-06-01"}
+        sysmsg = "\n".join(m["content"] for m in messages if m["role"] == "system")
+        contents = [{"role": "user" if m["role"] != "assistant" else "model",
+                     "parts": [{"text": m["content"]}]}
+                    for m in messages if m["role"] != "system"]
+        generation = {"maxOutputTokens": max_new, "temperature": temperature}
+        if stop:
+            generation["stopSequences"] = stop
+        body = {"contents": contents, "generationConfig": generation}
+        if sysmsg:
+            body["systemInstruction"] = {"parts": [{"text": sysmsg}]}
+        return (f"{self.p['base_url']}/models/{self.p['model']}:generateContent", body,
+                {"x-goog-api-key": self.key})
+
+    @staticmethod
+    def _messages_from_prompt(prompt):
+        pattern = re.compile(r"<\|(system|user|assistant)\|>\n(.*?)<\|end\|>\n?", re.S)
+        messages = [{"role": role, "content": content}
+                    for role, content in pattern.findall(prompt or "")]
+        if not messages:
+            return [{"role": "user", "content": prompt or ""}]
+        tail = pattern.sub("", prompt or "").strip()
+        if tail and tail not in ("<|assistant|>", "<|assistant|>\\n"):
+            messages.append({"role": "assistant", "content": tail.removeprefix("<|assistant|>").strip()})
+        return messages
+
+    def complete(self, prompt, max_new=600, temperature=0.4, top_k=None, top_p=None,
+                 stop=None, messages=None):
+        msgs = messages or self._messages_from_prompt(prompt)
+        url, body, hdr = self._payload(msgs, max_new, temperature, stop=stop)
         r = self.httpx.post(url, json={k: v for k, v in body.items() if v is not None},
                             headers=hdr, timeout=120)
         r.raise_for_status()
         d = r.json()
         k = self.p["kind"]
-        if k == "openai": return d["choices"][0]["message"]["content"]
-        if k == "anthropic": return "".join(b.get("text", "") for b in d.get("content", []))
-        return "".join(p.get("text", "") for p in d["candidates"][0]["content"]["parts"])
+        if k == "openai":
+            text = d["choices"][0]["message"].get("content") or ""
+        elif k == "anthropic":
+            text = "".join(b.get("text", "") for b in d.get("content", []))
+        else:
+            text = "".join(p.get("text", "") for p in d["candidates"][0]["content"]["parts"])
+        for marker in stop or []:
+            if marker in text:
+                text = text.split(marker, 1)[0]
+        return text
+
     def choice(self, prompt, options):
-        return [(o, 0.0) for o in options]      # la API decide sola; no la enrutamos
+        # Estos endpoints no exponen log-probabilidades comparables de continuaciones.
+        return []
 
     def stream(self, prompt, **kw):
         txt = self.complete(prompt, **kw)

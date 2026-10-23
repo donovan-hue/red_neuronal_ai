@@ -171,7 +171,10 @@ def expression_for(q):
     m = re.match(r"Cual es el residuo de dividir (\d+) entre (\d+)", q)
     if m: return f"{m.group(1)} % {m.group(2)}"
     m = re.match(r"Halla el minimo comun multiplo de (\d+) y (\d+)", q)
-    if m: return f"mcm({m.group(1)},{m.group(2)})"
+    if m:
+        import math
+        a, b = map(int, m.groups())
+        return f"{a}*{b}//{math.gcd(a, b)}"
     return None
 
 def render_train(q, a, cot=True, why=None, i=0, expr=None):

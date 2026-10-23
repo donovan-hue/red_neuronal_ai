@@ -32,8 +32,10 @@ def estimate_loss(model, data, T, B, n, dev, gen):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--config", default=os.path.join(ROOT, "config.json"))
-    ap.add_argument("--steps", type=int, default=None)
+    ap.add_argument("--steps", type=int, default=None, help="paso final absoluto")
+    ap.add_argument("--additional-steps", type=int, default=None, help="pasos a añadir al checkpoint actual")
     ap.add_argument("--resume", type=int, default=1)
+    ap.add_argument("--no-resume", action="store_true")
     a = ap.parse_args()
     cfg = json.load(open(a.config))
     tc, mc = cfg["train"], cfg["model"]
@@ -47,7 +49,11 @@ def main():
     print(f"tokens train={len(tr)/1e6:.2f}M val={len(va)/1e6:.2f}M vocab={vocab} dev={dev}", flush=True)
 
     data = {"train": torch.from_numpy(tr.astype(np.int64)), "val": torch.from_numpy(va.astype(np.int64))}
+    if len(tr) < 8 or len(va) < 8:
+        raise SystemExit("dataset train/val insuficiente; ejecuta ./run.sh data y reconstruye el corpus")
     T = min(mc["block_size"], int(tr.shape[0] / tc["batch_size"] / 4))
+    if T < 2 or len(va) <= T + 1:
+        raise SystemExit("secuencia o validación demasiado pequeñas para entrenar")
     model = NexusLM(vocab=vocab, block=T, d=mc["d_model"], n_layers=mc["n_layers"],
                     n_heads=mc["n_heads"], n_kv=mc.get("n_kv", 4),
                     ff=int(tc.get("ff", mc["ff_mult"]) * mc["d_model"]) // 32 * 32,
@@ -63,16 +69,29 @@ def main():
                             betas=(tc["beta1"], tc["beta2"]))
     ckpt_path = os.path.join(ROOT, tc["ckpt"])
     start, best = 0, float("inf")
-    if a.resume and os.path.exists(ckpt_path):
+    if a.resume and not a.no_resume and os.path.exists(ckpt_path):
         d = torch.load(ckpt_path, map_location=dev, weights_only=False)
-        if d.get("vocab") == vocab and d["cfg"]["d"] == model.cfg["d"]:
-            model.load_state_dict(d["model"]); opt.load_state_dict(d["opt"])
-            start = d["step"] + 1; best = d.get("best", best)
+        if d.get("vocab") == vocab and all(d.get("cfg", {}).get(key) == value
+                                                for key, value in model.cfg.items()):
+            incompatible = model.load_state_dict(d["model"], strict=False)
+            allowed_missing = {key for key in incompatible.missing_keys if key.endswith(".w")}
+            if set(incompatible.missing_keys) != allowed_missing or incompatible.unexpected_keys:
+                raise SystemExit("checkpoint tiene pesos incompatibles")
+            try:
+                opt.load_state_dict(d["opt"])
+            except (ValueError, KeyError, RuntimeError):
+                print("checkpoint de optimizador anterior; reinicio el estado de AdamW", flush=True)
+            start = int(d["step"]) + 1
+            best = d.get("best", best)
             print(f"reanudando desde step {start} (val {d.get('losses',{}).get('val',float('nan')):.3f})", flush=True)
         else:
             print("checkpoint incompatible: empiezo de cero", flush=True)
 
-    total = a.steps or tc["steps"]
+    if a.steps is not None and a.additional_steps is not None:
+        raise SystemExit("usa solo uno entre --steps y --additional-steps")
+    if a.additional_steps is not None and a.additional_steps < 1:
+        raise SystemExit("--additional-steps debe ser positivo")
+    total = start + a.additional_steps if a.additional_steps is not None else (a.steps or tc["steps"])
     steps = total - start
     if steps <= 0:
         print("ya entrenado hasta", total); return

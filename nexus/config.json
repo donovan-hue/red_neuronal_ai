@@ -1,5 +1,5 @@
 {
-  "_comment": "Configuracion unica del sistema. Edita aqui; nada esta hardcodeado en el codigo.",
+  "_comment": "Configuración funcional principal. Los límites de seguridad y ciertas rutas también se validan en código.",
   "provider": "auto",
   "_provider_help": "auto = usa API frontier si hay clave en entorno, si no, motor local entrenado aqui. Forzar: local | openai | anthropic | gemini",
   "providers": {
@@ -76,11 +76,11 @@
     "chunk_chars": 900,
     "overlap": 120,
     "top_k": 4,
-    "index": "models/rag_index.npz"
+    "index": "models/rag_index.json.gz"
   },
   "eval": {
     "suite": "nexus-bench-v1",
-    "items_per_task": 40,
+    "items_per_task": 8,
     "report": "runs/eval_report.json"
   },
   "server": {

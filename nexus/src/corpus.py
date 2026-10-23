@@ -3,7 +3,7 @@
 Salidas: models/tokenizer.json, data/tokens/{train.bin,val.bin,manifest.json}
 """
 from __future__ import annotations
-import json, os, re, sys, numpy as np
+import hashlib, json, os, re, sys, numpy as np
 sys.path.insert(0, os.path.dirname(__file__))
 import synth
 from tokenizers import Tokenizer, models, pre_tokenizers, decoders, trainers
@@ -43,6 +43,8 @@ def paragraphs(text, min_chars, target=1600):
 def load_docs(cfg):
     ddir = os.path.join(ROOT, cfg["data"]["dir"])
     docs = []
+    if not os.path.isdir(ddir):
+        return docs
     for fn in sorted(os.listdir(ddir)):
         if not fn.endswith(".txt"):
             continue
@@ -52,6 +54,26 @@ def load_docs(cfg):
             continue
         docs.extend(paragraphs(clean_book(raw), cfg["data"]["min_doc_chars"]))
     return docs
+
+def dataset_fingerprint(cfg):
+    ddir = os.path.join(ROOT, cfg["data"]["dir"])
+    sources = []
+    if os.path.isdir(ddir):
+        for name in sorted(os.listdir(ddir)):
+            path = os.path.join(ddir, name)
+            if name.endswith(".txt") and os.path.isfile(path):
+                digest = hashlib.sha256()
+                with open(path, "rb") as source:
+                    for chunk in iter(lambda: source.read(1024 * 1024), b""):
+                        digest.update(chunk)
+                sources.append((name, digest.hexdigest()))
+    relevant = {"pipeline_version": 2, "sources": sources,
+                "data": {k: cfg["data"].get(k) for k in
+                         ("min_doc_chars", "synth_share", "synth_samples", "seed")},
+                "model_vocab_size": cfg["model"]["vocab_size"]}
+    encoded = json.dumps(relevant, sort_keys=True, ensure_ascii=False).encode()
+    return hashlib.sha256(encoded).hexdigest()
+
 
 def synth_blocks(cfg, n, seed):
     rng = random_seed(seed)
@@ -84,13 +106,31 @@ def train_tokenizer(texts, vocab, path):
 def build(cfg, force=False):
     outdir = os.path.join(ROOT, cfg["data"]["out"])
     manifest = os.path.join(outdir, "manifest.json")
-    if os.path.exists(manifest) and not force:
-        print("dataset ya construido:", json.load(open(manifest))); return
+    tk_path = os.path.join(ROOT, cfg["model"]["params_dir"], "tokenizer.json")
+    fingerprint = dataset_fingerprint(cfg)
+    required = [manifest, os.path.join(outdir, "train.bin"), os.path.join(outdir, "val.bin"),
+                os.path.join(outdir, "vocab.json"), tk_path]
+    previous = {}
+    if os.path.isfile(manifest):
+        try:
+            previous = json.load(open(manifest, encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            previous = {}
+    same_dataset = previous.get("fingerprint") == fingerprint
+    if not force and same_dataset and all(os.path.isfile(path) for path in required):
+        print("dataset ya construido:", previous)
+        return
+    checkpoint = os.path.join(ROOT, cfg["train"]["ckpt"])
+    if os.path.isfile(checkpoint) and not same_dataset:
+        raise SystemExit("dataset/tokenizer cambiaría mientras existe un checkpoint; mueve el checkpoint antes de reconstruir")
     os.makedirs(outdir, exist_ok=True)
     docs = load_docs(cfg)
+    if not docs:
+        raise SystemExit("no hay documentos de entrenamiento; ejecuta ./run.sh data")
     print(f"documentos literarios: {len(docs)}  ({sum(len(d) for d in docs)/1e6:.1f} MB)")
 
-    tk_path = os.path.join(ROOT, cfg["model"]["params_dir"], "tokenizer.json")
+    if not 0 <= cfg["data"]["synth_share"] < 1:
+        raise ValueError("data.synth_share debe estar entre 0 (incluido) y 1 (excluido)")
     sample = docs[: max(1, len(docs) // 4)]
     tok = train_tokenizer(sample, cfg["model"]["vocab_size"], tk_path)
     V = tok.get_vocab_size()
@@ -120,8 +160,9 @@ def build(cfg, force=False):
     nv = dump(val, os.path.join(outdir, "val.bin"), V)
     json.dump({"train_tokens": int(nt), "val_tokens": int(nv), "vocab": V,
                "docs": len(docs), "synth_blocks": len(synth_use),
-               "docs_total": len(corpus), "char_len_avg": int(np.mean(lengths))},
-              open(manifest, "w"), indent=2)
+               "docs_total": len(corpus), "char_len_avg": int(np.mean(lengths)),
+               "fingerprint": fingerprint},
+              open(manifest, "w", encoding="utf-8"), indent=2)
     json.dump({"vocab": V}, open(os.path.join(outdir, "vocab.json"), "w"))
     print("listo:", nt, "tokens train /", nv, "val")
 

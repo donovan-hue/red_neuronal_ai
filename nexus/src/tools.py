@@ -1,6 +1,6 @@
 """Herramientas del agente. Cada una es pura, acotada y devuelve texto plano."""
 from __future__ import annotations
-import ast, datetime as dt, json, os, re, sqlite3, subprocess, sys, tempfile, time
+import ast, datetime as dt, json, math, os, re, sqlite3, sys, threading, time
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, "src"))
@@ -19,9 +19,14 @@ def _safe_eval(node):
         if isinstance(node.op, ast.Div) and r == 0: raise ZeroDivisionError
         if isinstance(node.op, ast.FloorDiv) and r == 0: raise ZeroDivisionError
         if isinstance(node.op, ast.Mod) and r == 0: raise ZeroDivisionError
-        return {"Add": lambda: l + r, "Sub": lambda: l - r, "Mult": lambda: l * r,
-                "Div": lambda: l / r, "FloorDiv": lambda: l // r, "Mod": lambda: l % r,
-                "Pow": lambda: l ** r}[type(node.op).__name__]()
+        value = {"Add": lambda: l + r, "Sub": lambda: l - r, "Mult": lambda: l * r,
+                 "Div": lambda: l / r, "FloorDiv": lambda: l // r, "Mod": lambda: l % r,
+                 "Pow": lambda: l ** r}[type(node.op).__name__]()
+        if isinstance(value, int) and value.bit_length() > 256:
+            raise ValueError("resultado fuera de rango")
+        if isinstance(value, float) and (not math.isfinite(value) or abs(value) > 1e100):
+            raise ValueError("resultado fuera de rango")
+        return value
     if isinstance(node, ast.UnaryOp) and node.op.__class__ in _BIN:
         v = _safe_eval(node.operand)
         return -v if isinstance(node.op, ast.USub) else v
@@ -29,10 +34,16 @@ def _safe_eval(node):
 
 def calc(expr, _cfg=None):
     """Evalua aritmetica exacta. Soporta ** // % y parentesis."""
-    e = re.sub(r"[xX]", "*", str(expr).strip())
-    e = e.replace("^", "**")
-    e = re.sub(r"[^\d+\-*/%(). ]", "", e)
-    val = _safe_eval(ast.parse(e, mode="eval"))
+    e = re.sub(r"[xX×]", "*", str(expr).strip()).replace("^", "**")
+    if not e or len(e) > 256 or re.search(r"[^\d+\-*/%(). ]", e):
+        raise ValueError("expresion vacia, demasiado larga o con caracteres no permitidos")
+    tree = ast.parse(e, mode="eval")
+    if sum(1 for _ in ast.walk(tree)) > 80:
+        raise ValueError("expresion demasiado compleja")
+    if any(isinstance(n, ast.Constant) and isinstance(n.value, int) and n.value.bit_length() > 256
+           for n in ast.walk(tree)):
+        raise ValueError("literal fuera de rango")
+    val = _safe_eval(tree)
     if isinstance(val, float) and abs(val - round(val)) < 1e-12:
         val = int(round(val))
     return f"{val}"
@@ -133,20 +144,9 @@ def _best_expr(t):
     return (best[2], best[3]) if best else None
 
 def python_exec(code, _cfg=None, timeout=10):
-    """Ejecuta Python aislado en un subproceso con tiempo y salida acotados."""
-    code = re.sub(r"^\s*```(python)?|```\s*$", "", code, flags=re.M)
-    with tempfile.NamedTemporaryFile("w", suffix=".py", delete=False) as f:
-        f.write(code); path = f.name
-    try:
-        r = subprocess.run([sys.executable, "-I", path], capture_output=True, text=True,
-                           timeout=timeout, cwd=tempfile.gettempdir())
-        out = (r.stdout or "") + (("\n[stderr]\n" + r.stderr) if r.stderr else "")
-        out = out[:4000] or "(sin salida)"
-        return out
-    except subprocess.TimeoutExpired:
-        return f"[timeout despues de {timeout}s]"
-    finally:
-        os.unlink(path)
+    """Ejecución de Python deshabilitada: -I no constituye un sandbox de seguridad."""
+    return "[herramienta deshabilitada: ejecutar Python requiere un sandbox externo]"
+
 
 def now(_args=None, _cfg=None):
     return dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -162,8 +162,11 @@ def kb_search(query, index=None, k=None, _cfg=None):
 class Memory:
     """Memoria persistente: hechos declarados + trayectorias resueltas (ejemplares)."""
     def __init__(self, path):
-        os.makedirs(os.path.dirname(path), exist_ok=True)
+        parent = os.path.dirname(path)
+        if parent:
+            os.makedirs(parent, exist_ok=True)
         self.c = sqlite3.connect(path, check_same_thread=False)
+        self.lock = threading.RLock()
         self.c.executescript("""
           CREATE TABLE IF NOT EXISTS facts(id INTEGER PRIMARY KEY, k TEXT, v TEXT, t REAL);
           CREATE TABLE IF NOT EXISTS traces(id INTEGER PRIMARY KEY, q TEXT, a TEXT, ok INTEGER,
@@ -171,20 +174,29 @@ class Memory:
         """)
         self.c.commit()
     def remember(self, k, v, _cfg=None):
-        self.c.execute("INSERT INTO facts(k,v,t) VALUES(?,?,?)", (str(k), str(v), time.time()))
-        self.c.commit(); return "hecho guardado"
+        with self.lock:
+            self.c.execute("INSERT INTO facts(k,v,t) VALUES(?,?,?)", (str(k), str(v), time.time()))
+            self.c.commit()
+        return "hecho guardado"
     def recall(self, q, n=5, _cfg=None):
-        rows = self.c.execute("SELECT k,v FROM facts ORDER BY id DESC LIMIT ?", (n,)).fetchall()
-        return "\n".join(f"- {k}: {v}" for k, v in rows) or "(memoria vacia)"
+        # La tabla de hechos no tiene embeddings; filtra lexicalmente para no mezclar hechos ajenos.
+        terms = {x.lower() for x in re.findall(r"[\wáéíóúñ]+", str(q or "")) if len(x) > 2}
+        with self.lock:
+            rows = self.c.execute("SELECT k,v FROM facts ORDER BY id DESC LIMIT 500").fetchall()
+        if terms:
+            rows = [(k, v) for k, v in rows if terms & {x.lower() for x in re.findall(r"[\wáéíóúñ]+", f"{k} {v}")}]
+        return "\n".join(f"- {k}: {v}" for k, v in rows[:n]) or "(sin hechos coincidentes)"
     def log_trace(self, q, a, ok, steps):
-        self.c.execute("INSERT INTO traces(q,a,ok,steps,t) VALUES(?,?,?,?,?)",
-                       (q, a, int(bool(ok)), json.dumps(steps, ensure_ascii=False)[:4000], time.time()))
-        self.c.commit()
+        with self.lock:
+            self.c.execute("INSERT INTO traces(q,a,ok,steps,t) VALUES(?,?,?,?,?)",
+                           (q, a, int(bool(ok)), json.dumps(steps, ensure_ascii=False)[:4000], time.time()))
+            self.c.commit()
     def good_traces(self, q, n=2):
         """Recupera trayectorias correctas pareadas lexicalmente (autoaprendizaje)."""
         from rag import tokenize
         qw = set(tokenize(q))
-        rows = self.c.execute("SELECT q,a,steps FROM traces WHERE ok=1 ORDER BY id DESC LIMIT 400").fetchall()
+        with self.lock:
+            rows = self.c.execute("SELECT q,a,steps FROM traces WHERE ok=1 ORDER BY id DESC LIMIT 400").fetchall()
         sc = []
         for rq, ra, rs in rows:
             rw = set(tokenize(rq))

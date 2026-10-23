@@ -76,8 +76,7 @@ autoconsistencia, RAG, enrutado por coste en `engine.make_engine`).
 
 ## 4. Seguridad y cumplimiento (no opcional en producto)
 
-- Herramientas con *allow-list* por usuario; `python` en contenedor sin red ni secretos;
-  límite de salida y de tiempo (aquí: subproceso `-I`, 10 s, 4 KB).
+- Herramientas con *allow-list* por usuario; Python permanece deshabilitado hasta que exista un contenedor real sin red ni secretos. El modo `-I` no es un sandbox.
 - Presunción de inyección por recuperación: el texto del corpus nunca es instrucciones.
 - Registro completo de trazas (aquí: `traces` en SQLite) para auditoría post-hoc.
 - Evaluación de jailbreak y sesgo antes de cada release; límite de gasto por sesión.
