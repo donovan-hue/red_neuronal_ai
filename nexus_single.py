@@ -5,18 +5,18 @@ Un archivo, cero dependencias, cero descargas. Sirve para desplegar en un host
 que tenga Python 3.11+ y para medir el andamiaje sin necesitar un modelo local.
 
 Modos (automaticos segun el entorno):
-  OPENAI_API_KEY / ANTHROPIC_API_KEY / GEMINI_API_KEY  -> usa ese modelo frontier
-  sin clave                                            -> modo arnes: resuelve por
-     calculo exacto + busqueda en el corpus + verificacion programatica
-  al servir con una API key, define tambien NEXUS_API_TOKEN para autorizar consultas
+  OPENAI_API_KEY / ANTHROPIC_API_KEY / GEMINI_API_KEY  -> disponibles para `ask` y /api/ask
+  sin clave                                            -> arnes local de cálculo + búsqueda
+  La UI de `serve` es una simulación conversacional local: no envía sus mensajes a /api/ask.
+  Para usar /api/ask con un proveedor de pago, configura NEXUS_API_TOKEN además de la clave.
 
 Uso:
-  python3 nexus_single.py serve [puerto]     # API + UI web (SSE)
-  python3 nexus_single.py ask "pregunta"     # una pregunta por consola
+  python3 nexus_single.py serve [puerto]     # simulación local con avatar + endpoints locales
+  python3 nexus_single.py ask "pregunta"     # agente/arnés por consola
   python3 nexus_single.py selftest           # benchmark interno, sale 1 si falla
 """
 from __future__ import annotations
-import ast, html, json, math, os, random, re, sqlite3, sys, time
+import ast, base64, html, json, math, os, random, re, sqlite3, sys, time
 import urllib.request, urllib.error
 from collections import Counter
 from threading import RLock
@@ -443,23 +443,69 @@ def benchmark(n=12, seed=4242):
     return acc
 
 # --------------------------------------------------------------------- servidor
-HTML = """<!doctype html><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1"><title>NEXUS</title>
-<style>body{background:#0a0c11;color:#dfe6f1;font:15px/1.6 system-ui,sans-serif;margin:0;padding:24px;max-width:820px;margin:auto}h1{font-size:16px;letter-spacing:.14em}h1 b{color:#5eead4}#o{white-space:pre-wrap;background:#11151d;border:1px solid #1e2634;border-radius:12px;padding:14px;min-height:90px;margin:14px 0}input,button{background:#0d1117;color:#dfe6f1;border:1px solid #1e2634;border-radius:10px;padding:11px;font:inherit}input{flex:1}button{background:#5eead4;color:#06231f;border:0;font-weight:700;cursor:pointer}div{display:flex;gap:9px}small{color:#7b879c}</style>
-<h1>NEXUS<b>·</b>single-file</h1><small id=m></small><div id=o></div><div><input id=q placeholder="Escribe una pregunta"><button id=send>Enviar</button></div>
+HTML = """<!doctype html>
+<html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>NEXUS · conversación simulada</title>
+<style>
+:root{color-scheme:dark;--bg:#070a10;--panel:#101722;--panel2:#0b111b;--line:#243248;--text:#e9f2ff;--muted:#91a2bb;--cyan:#72efff;--violet:#9c79ff;--pink:#ff65cf;--green:#66f0c2}
+*{box-sizing:border-box}body{margin:0;min-height:100vh;background:radial-gradient(ellipse at 50% -15%,#17263c 0,#090e17 48%,var(--bg) 100%);color:var(--text);font:15px/1.55 system-ui,-apple-system,"Segoe UI",sans-serif}
+.app{max-width:1080px;margin:auto;padding:24px 18px 32px}.topbar{display:flex;justify-content:space-between;align-items:center;gap:14px;margin-bottom:18px}.brand{display:flex;align-items:center;gap:11px}.brand-mark{width:9px;height:9px;border-radius:50%;background:var(--green);box-shadow:0 0 14px var(--green)}.brand h1{font-size:14px;letter-spacing:.2em;margin:0}.brand small{display:block;color:var(--muted);font-size:10px;letter-spacing:.15em;margin-top:2px}.offline{border:1px solid #295849;color:#a8ffdf;background:#0b211c;border-radius:999px;padding:7px 11px;font-size:11px;white-space:nowrap}
+.layout{display:grid;grid-template-columns:300px minmax(0,1fr);gap:16px;align-items:stretch}.card{background:linear-gradient(150deg,rgba(17,25,38,.97),rgba(10,15,24,.97));border:1px solid var(--line);border-radius:20px;box-shadow:0 18px 50px #0005}.profile{padding:22px;display:flex;flex-direction:column;align-items:center;text-align:center;min-height:610px}.avatar-halo{width:206px;height:206px;display:grid;place-items:center;border-radius:50%;margin:13px auto 21px;position:relative;background:radial-gradient(circle,#173043 0,#10172b 55%,transparent 72%)}.avatar-halo:before,.avatar-halo:after{content:"";position:absolute;inset:8px;border:1px solid #66efff55;border-radius:50%;box-shadow:0 0 24px #39dfff18}.avatar-halo:after{inset:-4px;border-color:#a36bff40;transform:rotate(-25deg) scaleX(.83)}.avatar{width:174px;height:174px;object-fit:cover;border-radius:50%;border:1px solid #8cf6ff99;background:#050811;box-shadow:0 0 35px #38dfff35;position:relative;z-index:1;transition:filter .25s,transform .25s}.avatar-halo.talking .avatar{filter:brightness(1.16) saturate(1.2);transform:scale(1.035)}.avatar-halo.talking:before{animation:pulse .62s ease-in-out infinite alternate}.avatar-halo.talking:after{animation:orbit 2.6s linear infinite}@keyframes pulse{to{box-shadow:0 0 30px #55eaff88;transform:scale(1.06)}}@keyframes orbit{to{transform:rotate(335deg) scaleX(.83)}}
+.state{display:flex;align-items:center;gap:7px;color:#b7c7dc;font-size:12px}.state-dot{width:7px;height:7px;border-radius:50%;background:var(--green);box-shadow:0 0 9px #66f0c2}.profile h2{margin:12px 0 5px;font-size:25px;letter-spacing:.02em}.role{color:#9db0ca;font-size:12px;letter-spacing:.12em;text-transform:uppercase}.profile p{color:var(--muted);font-size:13px;margin:15px 0 18px;max-width:240px}.local-note{margin-top:auto;width:100%;border:1px solid #24384a;border-radius:12px;padding:10px;color:#a8bdd3;background:#0a111a;font-size:11px;text-align:left}.local-note b{color:#8ef5ff}
+.chat{min-height:610px;display:flex;flex-direction:column;overflow:hidden}.chat-head{padding:17px 19px;border-bottom:1px solid var(--line);display:flex;align-items:center;justify-content:space-between;gap:10px}.chat-head strong{font-size:14px}.chat-head small{color:var(--muted);font-size:11px}.chat-meta{display:flex;align-items:center;gap:11px}.reset{border:1px solid #34445a;border-radius:9px;background:#101824;color:#b8cadf;padding:6px 9px;font:inherit;font-size:10px;cursor:pointer}.reset:hover{border-color:var(--cyan);color:var(--cyan)}.messages{padding:18px;flex:1;min-height:300px;max-height:calc(100vh - 355px);overflow:auto;display:flex;flex-direction:column;gap:14px;scroll-behavior:smooth}.row{display:flex;align-items:flex-end;gap:9px;max-width:91%}.row.assistant{align-self:flex-start}.row.user{align-self:flex-end;flex-direction:row-reverse}.mini-avatar{width:31px;height:31px;flex:0 0 31px;border-radius:50%;object-fit:cover;border:1px solid #59deee88;background:#060a12}.bubble{padding:10px 13px;border:1px solid #26384d;border-radius:15px 15px 15px 4px;background:#131d2b;white-space:pre-wrap;overflow-wrap:anywhere}.user .bubble{border-color:#51417e;background:linear-gradient(140deg,#29213d,#172034);border-radius:15px 15px 4px 15px}.time{font-size:9px;color:#71839a;margin:4px 4px 0}.suggestions{display:flex;flex-wrap:wrap;gap:7px;padding:0 18px 12px}.suggestions button{border:1px solid #33455c;border-radius:999px;padding:7px 10px;background:#0b131e;color:#bfd0e5;font:inherit;font-size:11px;cursor:pointer}.suggestions button:hover{border-color:var(--cyan);color:var(--cyan)}.composer{display:flex;gap:9px;padding:13px 15px;border-top:1px solid var(--line);background:#0a1019}.composer input{flex:1;min-width:0;border:1px solid #2a3a50;border-radius:12px;padding:12px 13px;background:#080e17;color:var(--text);font:inherit;outline:none}.composer input:focus{border-color:#5ecddd;box-shadow:0 0 0 3px #36dced16}.composer button{border:0;border-radius:11px;padding:0 16px;background:linear-gradient(135deg,#70edff,#8ca8ff);color:#07111d;font-weight:750;font:inherit;cursor:pointer}.composer button:disabled{opacity:.5;cursor:wait}.typing{display:inline-flex;gap:4px;padding:4px 1px}.typing i{width:6px;height:6px;border-radius:50%;background:#91d9e8;animation:dot .9s infinite alternate}.typing i:nth-child(2){animation-delay:.2s}.typing i:nth-child(3){animation-delay:.4s}@keyframes dot{to{opacity:.22;transform:translateY(-3px)}}
+@media(max-width:760px){.app{padding:14px 10px 24px}.layout{grid-template-columns:1fr;gap:11px}.profile{min-height:auto;padding:15px}.avatar-halo{width:136px;height:136px;margin:2px auto 12px}.avatar{width:116px;height:116px}.profile h2{font-size:21px;margin-top:7px}.profile p{margin:9px 0 12px}.local-note{margin-top:0}.chat{min-height:480px}.messages{max-height:46vh;min-height:230px}.offline{font-size:9px;padding:6px 8px}.topbar{margin-bottom:11px}}
+</style></head><body>
+<div class="app">
+<header class="topbar"><div class="brand"><span class="brand-mark"></span><div><h1>NEXUS</h1><small>AVATAR CONVERSACIONAL</small></div></div><div class="offline">SIMULACIÓN LOCAL · SIN API</div></header>
+<main class="layout">
+<section class="card profile" aria-label="Avatar de NEXUS">
+  <div class="avatar-halo" id="avatarHalo"><img class="avatar" data-avatar alt="Avatar androide iridiscente de NEXUS"></div>
+  <div class="state"><span class="state-dot"></span><span id="stateText">Disponible para conversar</span></div>
+  <h2>NEXUS</h2><div class="role">Asistente virtual · modo demostración</div>
+  <p>Una simulación interactiva de conversación con un avatar inspirado en el cromo iridiscente de la referencia.</p>
+  <div class="local-note"><b>Privado y local.</b> Las respuestas son guionizadas en esta página. No se envían mensajes a una API ni se guardan fuera de esta sesión.</div>
+</section>
+<section class="card chat" aria-label="Conversación simulada">
+  <div class="chat-head"><strong>Conversación</strong><div class="chat-meta"><small>Demo sin conexión externa</small><button class="reset" id="resetButton" type="button">Reiniciar</button></div></div>
+  <div class="messages" id="messages" role="log" aria-live="polite"></div>
+  <div class="suggestions" id="suggestions">
+    <button type="button" data-q="¿Quién eres?">¿Quién eres?</button>
+    <button type="button" data-q="¿Qué puedes hacer?">¿Qué puedes hacer?</button>
+    <button type="button" data-q="¿Esta conversación está aislada?">¿Está aislada?</button>
+    <button type="button" data-q="¿Cuál es el MCM de 12 y 18?">MCM de 12 y 18</button>
+  </div>
+  <form class="composer" id="chatForm"><input id="userInput" autocomplete="off" maxlength="500" placeholder="Escribe un mensaje…" aria-label="Escribe un mensaje"><button id="sendButton" type="submit">Enviar</button></form>
+</section>
+</main></div>
 <script>
-const out=document.getElementById('o'), input=document.getElementById('q');
-fetch('/api/status').then(r=>r.json()).then(x=>document.getElementById('m').textContent=x.mode+' · '+x.docs+' fragmentos · python '+x.python);
-async function send(){const value=input.value.trim();if(!value)return;input.value='';out.textContent='';const token=sessionStorage.getItem('nexusApiToken')||'';
-let response=await fetch('/api/ask',{method:'POST',headers:{'Content-Type':'application/json','X-Nexus-Api-Token':token},body:JSON.stringify({q:value})});
-if(response.status===401){const fresh=prompt('Token de acceso NEXUS:')||'';if(fresh){sessionStorage.setItem('nexusApiToken',fresh);response=await fetch('/api/ask',{method:'POST',headers:{'Content-Type':'application/json','X-Nexus-Api-Token':fresh},body:JSON.stringify({q:value})});}}
-if(!response.ok){out.textContent=(await response.text()).slice(0,500);return;}
-const reader=response.body.getReader(),decoder=new TextDecoder();let buffer='';
-for(;;){const{done,value}=await reader.read();if(done)break;buffer+=decoder.decode(value,{stream:true});let index;
-while((index=buffer.indexOf(String.fromCharCode(10,10)))>=0){const frame=buffer.slice(0,index);buffer=buffer.slice(index+2);if(!frame.startsWith('data:'))continue;let event;try{event=JSON.parse(frame.slice(5).trim())}catch(_){continue}
-if(event.type==='tool')out.textContent+='▸ '+event.tool+' '+JSON.stringify(event.args)+'\\n'+String(event.obs||'').slice(0,600)+'\\n';else if(event.type==='token')out.textContent+=event.text||'';else if(event.type==='error')out.textContent+='\\n'+event.text;}}
+const AVATAR_SRC='__NEXUS_AVATAR__';document.querySelectorAll('[data-avatar]').forEach(img=>img.src=AVATAR_SRC);
+const messages=document.getElementById('messages'),input=document.getElementById('userInput'),form=document.getElementById('chatForm'),sendButton=document.getElementById('sendButton'),resetButton=document.getElementById('resetButton'),halo=document.getElementById('avatarHalo'),stateText=document.getElementById('stateText');
+const localText=s=>String(s||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase().trim();
+function addMessage(role,text){const row=document.createElement('div');row.className='row '+role;if(role==='assistant'){const image=document.createElement('img');image.className='mini-avatar';image.src=AVATAR_SRC;image.alt='';row.appendChild(image);}const wrap=document.createElement('div');const bubble=document.createElement('div');bubble.className='bubble';bubble.textContent=text;const time=document.createElement('div');time.className='time';time.textContent=new Date().toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'});wrap.append(bubble,time);row.appendChild(wrap);messages.appendChild(row);messages.scrollTop=messages.scrollHeight;return row;}
+function gcd(a,b){a=Math.abs(a);b=Math.abs(b);while(b)[a,b]=[b,a%b];return a;}
+function simulateReply(raw){const q=localText(raw),nums=(raw.match(/\d+/g)||[]).map(Number);
+ if(/\\bmcm\\b|minimo comun multiplo/.test(q)&&nums.length>=2){const [a,b]=nums;const value=a===0||b===0?0:Math.abs(a/gcd(a,b)*b);return `El MCM de ${a} y ${b} es ${value}. Es el menor número que aparece en las tablas de ambos: ${a} × ${value/a} = ${value} y ${b} × ${value/b} = ${value}.`;}
+ if(/\\bmcd\\b|maximo comun divisor/.test(q)&&nums.length>=2){const [a,b]=nums;return `El MCD de ${a} y ${b} es ${gcd(a,b)}: ese es el mayor número que divide a ambos sin dejar residuo.`;}
+ if(/aislad|privad|internet|api|clave|conectad/.test(q))return 'Sí. Esta demo está aislada: la conversación se resuelve aquí mismo con respuestas guionizadas. No usa claves, no llama a una API y no manda tus mensajes a internet.';
+ if(/quien eres|que eres|tu nombre|avatar|present/.test(q))return 'Soy NEXUS, un avatar androide de cromo iridiscente. En esta pantalla represento una conversación de demostración; no soy un modelo generativo conectado.';
+ if(/que puedes hacer|que sabes hacer|funcion/.test(q))return 'En esta simulación puedo responder sobre quién soy y cómo funciona el modo local, además de resolver ejemplos sencillos de MCM y MCD. Las demás respuestas son de muestra, no conocimiento abierto.';
+ if(/hola|buenas|buen dia|buenas tardes|buenas noches/.test(q))return '¡Hola! Qué gusto conversar contigo. Puedes preguntarme quién soy, qué puedo hacer o probar un cálculo de MCM.';
+ if(/gracias|muchas gracias/.test(q))return '¡De nada! Recuerda que esta charla es una simulación local y puedes reiniciarla cuando quieras.';
+ if(/adios|hasta luego|nos vemos/.test(q))return '¡Hasta luego! Aquí estaré cuando quieras volver a conversar.';
+ return 'Estoy en modo simulación local, así que no inventaré una respuesta general. Prueba preguntarme por el avatar, el aislamiento o un MCM/MCD con dos números.';
 }
-document.getElementById('send').onclick=send;input.onkeydown=e=>{if(e.key==='Enter')send()};
-</script>"""
+function startConversation(){addMessage('assistant','¡Hola! Soy NEXUS. Esta es una simulación local con avatar: puedes conversar conmigo sobre cómo funciona y probar algunos cálculos sencillos.');}
+function submitMessage(text){const value=(text===undefined?input.value:text).trim();if(!value||sendButton.disabled)return;input.value='';addMessage('user',value);sendButton.disabled=true;halo.classList.add('talking');stateText.textContent='NEXUS está respondiendo…';const typing=addMessage('assistant','');typing.querySelector('.bubble').innerHTML='<span class="typing" aria-label="NEXUS está escribiendo"><i></i><i></i><i></i></span>';setTimeout(()=>{typing.remove();addMessage('assistant',simulateReply(value));halo.classList.remove('talking');stateText.textContent='Disponible para conversar';sendButton.disabled=false;input.focus();},650);}
+form.addEventListener('submit',event=>{event.preventDefault();submitMessage();});resetButton.addEventListener('click',()=>{if(sendButton.disabled)return;messages.replaceChildren();startConversation();input.focus();});document.querySelectorAll('[data-q]').forEach(button=>button.addEventListener('click',()=>submitMessage(button.dataset.q)));startConversation();
+</script></body></html>"""
+
+_avatar_path = os.path.join(ROOT, "nexus", "web", "nexus-avatar.svg")
+try:
+    with open(_avatar_path, "rb") as _avatar_file:
+        _avatar_uri = "data:image/svg+xml;base64," + base64.b64encode(_avatar_file.read()).decode("ascii")
+except OSError:
+    _avatar_uri = ""  # La simulación sigue mostrando texto si falta el avatar SVG.
+HTML = HTML.replace("__NEXUS_AVATAR__", _avatar_uri)
 
 class H(BaseHTTPRequestHandler):
     idx = None
@@ -534,7 +580,8 @@ def main():
         H.idx = BM25(load_chunks())
         print(f"NEXUS single-file en :{port} | {len(H.idx.docs)} fragmentos | "
               f"{'LLM frontier' if llm_available else 'arnes determinista'}", flush=True)
-        ThreadingHTTPServer(("0.0.0.0", port), H).serve_forever()
+        host = os.environ.get("NEXUS_HOST", "127.0.0.1")
+        ThreadingHTTPServer((host, port), H).serve_forever()
     elif cmd == "ask":
         H.idx = H.idx or BM25(load_chunks())
         memory = Mem(DB)

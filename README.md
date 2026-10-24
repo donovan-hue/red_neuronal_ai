@@ -40,3 +40,13 @@ cd nexus
 NEXUS deshabilita la ejecución de Python porque un subproceso con `-I` no es un sandbox. Para habilitar un proveedor API de pago, configura `NEXUS_API_TOKEN`; para acciones administrativas configura además `NEXUS_ADMIN_TOKEN`. No expongas un servidor sin esos controles en un entorno público.
 
 Las limitaciones y resultados experimentales se documentan en `nexus/README.md` y `nexus/docs/`.
+
+### Simulación local con avatar
+
+Desde la raíz del repositorio:
+
+```bash
+python3 nexus_single.py serve 8080
+```
+
+Abre `http://127.0.0.1:8080`. Esta UI es una conversación guionizada de demostración, con avatar SVG local; no envía los mensajes a una API. El servidor se limita a `127.0.0.1` por defecto.

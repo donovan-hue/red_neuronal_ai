@@ -26,6 +26,11 @@ _RATE_LOCK = threading.Lock()
 _RATE = {}
 
 
+def _safe_error(exc):
+    """No expone mensajes de proveedores que podrían incluir URLs o credenciales."""
+    return f"{type(exc).__name__}: error interno; revisa el log local"
+
+
 def load_cfg():
     with CFG_PATH.open(encoding="utf-8") as f:
         return json.load(f)
@@ -45,7 +50,7 @@ def boot(force=False):
             error = None
         except Exception as exc:
             eng = None
-            error = f"{type(exc).__name__}: {exc}"
+            error = _safe_error(exc)
         memory_path = ROOT / cfg["agent"]["memory_db"]
         memory_path.parent.mkdir(parents=True, exist_ok=True)
         mem = AG.T.Memory(str(memory_path))
@@ -154,7 +159,7 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 self._send(200, status())
             except Exception as exc:
-                self._send(500, {"error": f"{type(exc).__name__}: {exc}"})
+                self._send(500, {"error": _safe_error(exc)})
             return
         if path == "/api/config":
             cfg = load_cfg()
@@ -188,7 +193,7 @@ class Handler(BaseHTTPRequestHandler):
         if target.is_file():
             suffix = target.suffix.lower()
             content_type = {".css": "text/css", ".js": "application/javascript",
-                            ".html": "text/html"}.get(suffix, "application/octet-stream")
+                            ".html": "text/html", ".svg": "image/svg+xml"}.get(suffix, "application/octet-stream")
             self._send(200, target.read_bytes(), content_type)
         else:
             self._send(404, {"error": "404"})
@@ -244,7 +249,7 @@ class Handler(BaseHTTPRequestHandler):
         try:
             agent = boot()
         except Exception as exc:
-            self._send(503, {"error": f"no se pudo iniciar NEXUS: {type(exc).__name__}: {exc}"})
+            self._send(503, {"error": "no se pudo iniciar NEXUS", "detail": _safe_error(exc)})
             return
         if _STATE["engine"] and _STATE["engine"].kind == "api":
             expected = os.environ.get("NEXUS_API_TOKEN", "")
@@ -294,7 +299,7 @@ class Handler(BaseHTTPRequestHandler):
             return
         except Exception as exc:
             try:
-                emit({"type": "error", "message": f"{type(exc).__name__}: {exc}",
+                emit({"type": "error", "message": _safe_error(exc),
                       "tb": traceback.format_exc()[-800:]})
             except OSError:
                 pass

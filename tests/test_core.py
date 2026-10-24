@@ -16,7 +16,7 @@ import tools
 from engine import APIEngine
 from agent import Agent
 from rag import BM25
-from server import Handler
+from server import Handler, _safe_error
 
 
 class CalculatorTests(unittest.TestCase):
@@ -156,6 +156,11 @@ class EngineTests(unittest.TestCase):
 
 
 class ServerPathTests(unittest.TestCase):
+    def test_provider_error_details_are_not_exposed(self):
+        message = _safe_error(RuntimeError("credential=private-value"))
+        self.assertNotIn("private-value", message)
+        self.assertIn("error interno", message)
+
     def test_static_path_cannot_escape_web_root(self):
         with tempfile.TemporaryDirectory() as temp:
             base = Path(temp) / "web"
@@ -170,10 +175,16 @@ class SingleFileTests(unittest.TestCase):
     def test_natural_language_numeric_answer(self):
         self.assertEqual(nexus_single.calc_nl("Halla el mcm de 84 y 126"), "252")
 
-    def test_generated_html_uses_text_content_not_untrusted_inner_html(self):
-        self.assertIn("buffer.indexOf(String.fromCharCode(10,10))", nexus_single.HTML)
-        self.assertIn("out.textContent", nexus_single.HTML)
-        self.assertNotIn("out.innerHTML", nexus_single.HTML)
+    def test_generated_html_renders_messages_as_text_and_stays_local(self):
+        self.assertIn("bubble.textContent=text", nexus_single.HTML)
+        self.assertIn("addMessage('user',value)", nexus_single.HTML)
+        self.assertNotIn("fetch(", nexus_single.HTML)
+        self.assertNotIn("XMLHttpRequest", nexus_single.HTML)
+        self.assertNotIn("WebSocket", nexus_single.HTML)
+        static_demo = (ROOT / "nexus" / "web" / "avatar-demo.html").read_text(encoding="utf-8")
+        expected_demo = nexus_single.HTML.replace(nexus_single._avatar_uri, "/nexus-avatar.svg")
+        self.assertEqual(static_demo, expected_demo)
+        self.assertIn("nexus-avatar.svg", static_demo)
 
 
 if __name__ == "__main__":
