@@ -5,7 +5,7 @@ import math, torch, torch.nn as nn, torch.nn.functional as F
 
 class RMSNorm(nn.Module):
     def __init__(self, d, eps=1e-5):
-        super().__init__(); self.w = torch.ones(d); self.eps = eps
+        super().__init__(); self.w = nn.Parameter(torch.ones(d)); self.eps = eps
     def forward(self, x):
         return x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + self.eps) * self.w
 
@@ -43,7 +43,8 @@ class Attn(nn.Module):
         q, k = rope_apply(q, cos, sin), rope_apply(k, cos, sin)
         if g > 1:
             k = k.repeat_interleave(g, dim=1); v = v.repeat_interleave(g, dim=1)
-        y = F.scaled_dot_product_attention(q, k, v, is_causal=(mask is None), dropout_p=self.drop)
+        y = F.scaled_dot_product_attention(q, k, v, is_causal=(mask is None),
+                                           dropout_p=self.drop if self.training else 0.0)
         return self.o(y.transpose(1, 2).reshape(B, T, d))
 
 
@@ -63,6 +64,10 @@ class Block(nn.Module):
 class NexusLM(nn.Module):
     def __init__(self, vocab, block=256, d=320, n_layers=4, n_heads=8, n_kv=4, ff=960, drop=0.0):
         super().__init__()
+        if min(vocab, block, d, n_layers, n_heads, n_kv, ff) < 1:
+            raise ValueError("dimensiones del modelo deben ser positivas")
+        if d % n_heads or n_heads % n_kv or (d // n_heads) % 2:
+            raise ValueError("d debe dividirse por n_heads; n_heads por n_kv y head_dim debe ser par")
         self.cfg = dict(vocab=vocab, block=block, d=d, n_layers=n_layers, n_heads=n_heads,
                         n_kv=n_kv, ff=ff, drop=drop)
         self.tok = nn.Embedding(vocab, d)
@@ -83,8 +88,9 @@ class NexusLM(nn.Module):
     def _cache_rope(self, T, device):
         if getattr(self, "_rc", None) is None or self._rc[0] < T or self._rc[1] != device:
             hd = self.cfg["d"] // self.cfg["n_heads"]
-            c, s = rope_cache(max(T, 2048), hd, device)
-            self._rc = (T, device, c, s)
+            size = max(T, 2048)
+            c, s = rope_cache(size, hd, device)
+            self._rc = (size, device, c, s)
         return self._rc[2], self._rc[3]
     def forward(self, idx, targets=None, y=None):
         B, T = idx.shape
@@ -127,5 +133,11 @@ class NexusLM(nn.Module):
 
 def load_model(ckpt, vocab, device="cpu"):
     d = torch.load(ckpt, map_location=device, weights_only=False)
+    if d.get("vocab") != vocab or d.get("cfg", {}).get("vocab") != vocab:
+        raise ValueError("vocabulario del checkpoint no coincide con tokenizer.json")
     m = NexusLM(**d["cfg"]).to(device).eval()
-    m.load_state_dict(d["model"]); return m, d
+    incompatible = m.load_state_dict(d["model"], strict=False)
+    allowed_missing = {key for key in incompatible.missing_keys if key.endswith(".w")}
+    if set(incompatible.missing_keys) != allowed_missing or incompatible.unexpected_keys:
+        raise ValueError("checkpoint incompatible con la arquitectura NEXUS")
+    return m, d

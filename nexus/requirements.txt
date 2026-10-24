@@ -1,2 +1,4 @@
-torch
-tokenizers
+numpy>=1.26
+httpx>=0.27,<1
+tokenizers>=0.15,<1
+torch>=2.2

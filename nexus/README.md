@@ -1,75 +1,48 @@
 # NEXUS
 
-Sistema de IA completo y ejecutable: un transformer **entrenado desde cero en esta máquina**,
-un agente con herramientas y verificación, recuperación, memoria, API con streaming y un
-banco de pruebas que mide de verdad lo que aporta cada pieza.
+Prototipo de agente con un transformer local opcional, proveedores API, herramientas aritméticas, RAG BM25, memoria SQLite y benchmark reproducible. No es un modelo frontier ni un servicio listo para exposición pública.
 
-No es un envoltorio de una API. `src/model.py`, `src/train.py`, `src/corpus.py`,
-`src/rag.py` y `src/eval.py` son implementacion propia (PyTorch + stdlib). Si añades una clave de API,
-el mismo agente la usa como motor; si no, usa el modelo local. Un campo decide cuál.
-
-## Arranque rápido
+## Inicio
 
 ```bash
 cd nexus
-./run.sh all            # corpus + entrenamiento en segundo plano + UI en :8080
-./run.sh eval --n 6     # benchmark de 4 brazos
-./run.sh ask "Calcula 27*13 + 401."
+./run.sh setup
+./run.sh train
+./run.sh serve
 ```
 
-Dependencias: `torch` (cpu), `tokenizers`, `numpy`. El script las instala si faltan, porque
-este entorno no conserva lo instalado entre sesiones.
+`setup` instala dependencias y descarga el corpus de Project Gutenberg cuando hace falta. El entrenamiento guarda checkpoints bajo `models/` y los datos bajo `data/`; ambos están excluidos de Git.
 
-El corpus (18 MB de Gutenberg) **no esta en el repo**: `./run.sh data` lo descarga con
-`src/fetch_corpus.sh` y reconstruye tokenizador y dataset. El repo pesa lo que importa.
-
-## Qué hay dentro
-
-| Ruta | Qué es |
-|---|---|
-| `config.json` | **todo lo configurable**: proveedor, tamaño del modelo, pasos, temperatura, k de autoconsistencia |
-| `src/model.py` | transformer: RMSNorm · RoPE · SwiGLU · GQA · embeddings atados (7.3M params) |
-| `src/train.py` | AdamW, warmup+coseno, clip, checkpoints reanudables, registro JSONL de la curva de pérdida |
-| `src/corpus.py` | 18 MB de literatura bilingüe real + datos sintéticos con respuesta verificable → 8.2M tokens |
-| `src/synth.py` | 20 generadores de problemas (aritmética, ecuaciones, lógica, conversión, extracción) |
-| `src/agent.py` | plan → acción → observación → verificación → autocrítica → memoria |
-| `src/tools.py` | calculadora exacta (AST), Python aislado, búsqueda BM25, memoria SQLite, fecha |
-| `src/engine.py` | `LocalEngine` (aquí) y `APIEngine` (OpenAI/Anthropic/Gemini) con el mismo contrato |
-| `src/eval.py` | `nexus-bench-v1`: exactitud por brazo, puntuable por programa, sin fuga entre train/eval |
-| `src/server.py` | HTTP + SSE, `/api/chat`, `/api/status`, `/api/config`, `/api/eval` |
-| `web/index.html` | UI con trazas de herramientas, veredicto del verificador y curva de pérdida |
-| `docs/ARCHITECTURE.md` | decisiones técnicas y límites honestos del sistema |
-| `docs/RESULTS.md` | **números medidos**: 26 % → 64 % solo con andamiaje, y dónde fallamos |
-| `docs/ROADMAP.md` | qué cuesta llegar a un modelo frontier, en FLOPs, GPU y euros |
-
-## Usar un modelo frontier (1 minuto)
+Para iniciar el servidor sin entrenar, descarga el checkpoint publicado:
 
 ```bash
-export OPENAI_API_KEY=sk-...      # o ANTHROPIC_API_KEY / GEMINI_API_KEY
-cd nexus && ./run.sh serve        # provider:"auto" ya lo detecta
+./get_model.sh
+./run.sh serve
 ```
-o fija el proveedor en `config.json` (`"provider": "anthropic"`) y pon el modelo que quieras.
-Sin clave, sigue funcionando con el motor local: no hay dependencia oculta de red.
 
-## Medir en vez de opinar
+El descargador verifica SHA-256 completo y crea el vocabulario y una partición de validación no solapada a partir del artefacto de entrenamiento publicado.
+
+## Benchmark
 
 ```bash
 ./run.sh eval --arms rawlm,lm_cot,tools,tools+router --n 6
-cat runs/eval_report.json
 ```
 
-Se espera que la curva suba del modelo desnudo al agente. Lo importante es la **pendiente**:
-cuánto rinde el andamiaje sobre un modelo de 7M parámetros. La misma suite corre contra un
-modelo frontier para comparar arquitecturas en igualdad de condiciones.
+Brazos aceptados: `rawlm`, `lm_cot`, `tools`, `tools+router` (también se aceptan los alias `lm`, `cot` y `agent`). Los resultados se escriben en `runs/eval_report.json`. El benchmark crea memoria aislada y no reutiliza trayectorias entre ítems.
 
-## Estado y advertencias
+Los resultados históricos de `docs/RESULTS.md` corresponden a otra revisión y **no deben interpretarse como resultado reproducido por el código actual**.
 
-- El modelo local es un demostrador de arquitectura: texto gramatical, aritmética poco
-  fiable a propósito (por eso manda la verificación por programa).
-- `tools.python` ejecuta código del modelo en un subproceso acotado. Antes de exponer esto
-  a usuarios: contenedor sin red, allow-list de herramientas y límite de gasto por sesión.
-- Conocimiento = corpus literario descargado, no un índice factual. El RAG responde de
-  Quijote, Holmes o Frankenstein, no de la actualidad.
+## Proveedor API
 
-## Artefactos entrenados
-No van en el arbol de git. Descargarlos: `bash nexus/get_model.sh` (Release v0.1, sha256 verificado).
+Define la clave correspondiente (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY` o `GEMINI_API_KEY`). Para habilitar llamadas desde el servidor configura también `NEXUS_API_TOKEN`; el cliente web solicitará ese token. Las llamadas a APIs pueden tener coste.
+
+## Seguridad y límites
+
+- Las operaciones de entrenamiento y evaluación requieren `NEXUS_ADMIN_TOKEN`.
+- `/api/config` es de solo lectura; los cambios se realizan fuera del servidor.
+- El servicio limita tamaño y estructura de solicitudes.
+- La herramienta de ejecución de Python está **deshabilitada**. `python -I` no constituye un sandbox.
+- NEXUS no debe exponerse públicamente sin HTTPS, límites de tasa/gasto y controles de despliegue adicionales.
+- El corpus por defecto es literatura, no una base factual actualizada.
+
+La descripción de arquitectura está en `docs/ARCHITECTURE.md`; la hoja de ruta no representa capacidades ya implementadas.
