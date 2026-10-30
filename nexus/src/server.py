@@ -1,6 +1,7 @@
 """API HTTP de NEXUS. Las operaciones administrativas requieren NEXUS_ADMIN_TOKEN."""
 from __future__ import annotations
 
+import copy
 import hmac
 import json
 import os
@@ -9,7 +10,7 @@ import subprocess
 import sys
 import threading
 import time
-import traceback
+import logging
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -22,8 +23,13 @@ _STATE = {"cfg": None, "engine": None, "agent": None, "index": None, "err": None
 _BOOT_LOCK = threading.RLock()
 _TASK_LOCK = threading.Lock()
 _TASKS = {"eval": False, "train": False}
+_TASK_RESULTS = {name: {"state": "idle"} for name in _TASKS}
 _RATE_LOCK = threading.Lock()
 _RATE = {}
+# Límites por proceso; para varios workers se necesita un limitador compartido.
+_RATE_MAX_ADDRESSES = 10_000
+_CHAT_SLOTS = threading.BoundedSemaphore(4)
+_LOG = logging.getLogger("nexus.security")
 
 
 def _safe_error(exc):
@@ -51,9 +57,8 @@ def boot(force=False):
         except Exception as exc:
             eng = None
             error = _safe_error(exc)
-        memory_path = ROOT / cfg["agent"]["memory_db"]
-        memory_path.parent.mkdir(parents=True, exist_ok=True)
-        mem = AG.T.Memory(str(memory_path))
+        # La instancia de arranque no almacena conversaciones en el disco.
+        mem = AG.T.Memory(":memory:") if eng else None
         _STATE.update(cfg=cfg, engine=eng, agent=AG.Agent(cfg, eng, index=index, memory=mem) if eng else None,
                       index=index, err=error)
         return _STATE["agent"]
@@ -100,6 +105,12 @@ def _authorized(handler):
 def _rate_allowed(address, limit):
     now = time.monotonic()
     with _RATE_LOCK:
+        # Elimina direcciones inactivas para evitar crecimiento indefinido.
+        for key in list(_RATE):
+            if not _RATE[key] or now - _RATE[key][-1] >= 60:
+                del _RATE[key]
+        if address not in _RATE and len(_RATE) >= _RATE_MAX_ADDRESSES:
+            return False
         calls = [stamp for stamp in _RATE.get(address, []) if now - stamp < 60]
         if len(calls) >= limit:
             _RATE[address] = calls
@@ -161,6 +172,18 @@ class Handler(BaseHTTPRequestHandler):
             except Exception as exc:
                 self._send(500, {"error": _safe_error(exc)})
             return
+        if path == "/api/tasks":
+            if not _rate_allowed((self.client_address[0], "admin"), 10):
+                self._send(429, {"error": "límite temporal de solicitudes excedido"}, extra={"Retry-After": "60"})
+                return
+            if not _authorized(self):
+                _LOG.warning("admin_denied action=tasks")
+                self._send(403, {"error": "operación administrativa deshabilitada o token inválido"})
+                return
+            with _TASK_LOCK:
+                results = copy.deepcopy(_TASK_RESULTS)
+            self._send(200, results)
+            return
         if path == "/api/config":
             cfg = load_cfg()
             self._send(200, cfg)
@@ -168,6 +191,13 @@ class Handler(BaseHTTPRequestHandler):
         if path in ("/", "/index.html"):
             target = WEB / "index.html"
         elif path.startswith("/api/download/") or path.startswith("/api/run/"):
+            if not _rate_allowed((self.client_address[0], "admin"), 10):
+                self._send(429, {"error": "límite temporal de solicitudes excedido"}, extra={"Retry-After": "60"})
+                return
+            if not _authorized(self):
+                _LOG.warning("admin_denied action=download")
+                self._send(403, {"error": "operación administrativa deshabilitada o token inválido"})
+                return
             prefix = "/api/download/" if path.startswith("/api/download/") else "/api/run/"
             name = path[len(prefix):]
             if not name or Path(name).name != name:
@@ -182,6 +212,7 @@ class Handler(BaseHTTPRequestHandler):
                 return
             content_type = "application/octet-stream" if prefix.endswith("download/") else "text/plain"
             extra = {"Content-Disposition": f'attachment; filename="{name}"'} if prefix.endswith("download/") else None
+            _LOG.warning("admin_download name=%s", repr(name))
             self._send(200, target.read_bytes(), content_type, extra)
             return
         else:
@@ -200,6 +231,18 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         path = self.path.split("?", 1)[0]
+        if path in ("/api/train", "/api/eval"):
+            if not _rate_allowed((self.client_address[0], "admin"), 10):
+                self._send(429, {"error": "límite temporal de solicitudes excedido"}, extra={"Retry-After": "60"})
+                return
+            if not _authorized(self):
+                _LOG.warning("admin_denied action=%s", path)
+                self._send(403, {"error": "operación administrativa deshabilitada o token inválido"})
+                return
+        elif path == "/api/chat":
+            if not _rate_allowed((self.client_address[0], "chat"), 10):
+                self._send(429, {"error": "límite temporal de solicitudes excedido"}, extra={"Retry-After": "60"})
+                return
         try:
             req = _json_body(self)
         except ValueError as exc:
@@ -208,9 +251,6 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/chat":
             self.chat(req)
         elif path in ("/api/train", "/api/eval"):
-            if not _authorized(self):
-                self._send(403, {"error": "operación administrativa deshabilitada o token inválido"})
-                return
             if path == "/api/train":
                 additional = req.get("additional_steps", 300)
                 if isinstance(additional, bool) or not isinstance(additional, int) or not 1 <= additional <= 100_000:
@@ -219,6 +259,7 @@ class Handler(BaseHTTPRequestHandler):
                 started = _start_task("train", additional)
             else:
                 started = _start_task("eval", None)
+            _LOG.warning("admin_task action=%s started=%s", path, started)
             self._send(202 if started else 409, {"started": started})
         elif path == "/api/config":
             self._send(405, {"error": "configuración de solo lectura; edite config.json fuera del servidor"},
@@ -260,11 +301,28 @@ class Handler(BaseHTTPRequestHandler):
             if not hmac.compare_digest(supplied, expected):
                 self._send(401, {"error": "token de API inválido"})
                 return
-        rate_limit = 10 if _STATE["engine"] and _STATE["engine"].kind == "api" else 30
-        if not _rate_allowed(self.client_address[0], rate_limit):
-            self._send(429, {"error": "límite temporal de solicitudes excedido"},
-                       extra={"Retry-After": "60"})
+        if not _CHAT_SLOTS.acquire(blocking=False):
+            self._send(503, {"error": "servidor ocupado; intenta de nuevo"},
+                       extra={"Retry-After": "5"})
             return
+        request_memory = None
+        try:
+            if agent is not None:
+                # No existe identidad de usuario autenticada: no compartir memoria
+                # ni trayectorias entre peticiones evita filtrar datos entre clientes.
+                import agent as AG
+                cfg = copy.deepcopy(agent.cfg)
+                cfg["agent"]["memory_db"] = ""
+                cfg["agent"]["trajectory_exemplars"] = 0
+                request_memory = AG.T.Memory(":memory:")
+                agent = AG.Agent(cfg, agent.engine, index=agent.index, memory=request_memory)
+            self._stream_chat(agent, q, clean_history, requested_k)
+        finally:
+            if request_memory is not None:
+                request_memory.c.close()
+            _CHAT_SLOTS.release()
+
+    def _stream_chat(self, agent, q, clean_history, requested_k):
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream; charset=utf-8")
         self.send_header("Cache-Control", "no-cache, no-transform")
@@ -283,7 +341,7 @@ class Handler(BaseHTTPRequestHandler):
                 return
             emit({"type": "start", "engine": _STATE["engine"].info()})
             result = agent.solve(q.strip(), history=clean_history,
-                                 k=req.get("k"), emit=lambda event: emit({
+                                 k=requested_k, emit=lambda event: emit({
                                      "type": "tool" if event["type"] == "action" else event["type"],
                                      **{key: val for key, val in event.items() if key != "type"}}))
             answer = result["answer"]
@@ -298,9 +356,9 @@ class Handler(BaseHTTPRequestHandler):
         except (BrokenPipeError, ConnectionResetError):
             return
         except Exception as exc:
+            logging.exception("Error durante la conversación NEXUS")
             try:
-                emit({"type": "error", "message": _safe_error(exc),
-                      "tb": traceback.format_exc()[-800:]})
+                emit({"type": "error", "message": _safe_error(exc)})
             except OSError:
                 pass
 
@@ -309,12 +367,23 @@ def _start_task(name, argument):
     with _TASK_LOCK:
         if any(_TASKS.values()):
             return False
+        if name not in _TASKS:
+            raise ValueError("tarea desconocida")
         _TASKS[name] = True
-    threading.Thread(target=_run_task, args=(name, argument), daemon=True).start()
+        _TASK_RESULTS[name] = {"state": "running", "started_at": time.time()}
+    try:
+        threading.Thread(target=_run_task, args=(name, argument), daemon=True).start()
+    except Exception:
+        with _TASK_LOCK:
+            _TASKS[name] = False
+            _TASK_RESULTS[name].update(state="failed", finished_at=time.time())
+        raise
     return True
 
 
 def _run_task(name, argument):
+    state = "failed"
+    returncode = None
     try:
         (ROOT / "runs").mkdir(parents=True, exist_ok=True)
         command = [sys.executable, "-u", str(ROOT / "src" / ("eval.py" if name == "eval" else "train.py"))]
@@ -322,14 +391,19 @@ def _run_task(name, argument):
             command.extend(["--additional-steps", str(argument)])
         log_path = ROOT / "runs" / f"{name}.log"
         with log_path.open("a", encoding="utf-8") as log:
-            subprocess.run(command, stdout=log, stderr=subprocess.STDOUT, cwd=ROOT,
-                           timeout=1800 if name == "eval" else 86_400, check=False)
-    except Exception as exc:
-        with (ROOT / "runs" / f"{name}.log").open("a", encoding="utf-8") as log:
-            log.write(f"\nerror {type(exc).__name__}: {exc}\n")
+            result = subprocess.run(command, stdout=log, stderr=subprocess.STDOUT, cwd=ROOT,
+                                    timeout=1800 if name == "eval" else 86_400, check=False)
+            returncode = result.returncode
+            state = "succeeded" if returncode == 0 else "failed"
+    except subprocess.TimeoutExpired:
+        state = "timed_out"
+        logging.warning("Tarea %s excedió el tiempo permitido", name)
+    except Exception:
+        logging.exception("Error al ejecutar la tarea %s", name)
     finally:
         with _TASK_LOCK:
             _TASKS[name] = False
+            _TASK_RESULTS[name].update(state=state, finished_at=time.time(), returncode=returncode)
 
 
 def main():

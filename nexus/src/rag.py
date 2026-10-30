@@ -33,8 +33,11 @@ def _source_fingerprint(cfg):
         paths.append(extra)
     sig = []
     for path in sorted(paths):
-        st = os.stat(path)
-        sig.append((os.path.relpath(path, ROOT), st.st_size, st.st_mtime_ns))
+        digest = hashlib.sha256()
+        with open(path, "rb") as stream:
+            for block in iter(lambda: stream.read(1024 * 1024), b""):
+                digest.update(block)
+        sig.append((os.path.relpath(path, ROOT), digest.hexdigest()))
     payload = {"files": sig, "chunk_chars": cfg["rag"]["chunk_chars"],
                "overlap": cfg["rag"].get("overlap", 0)}
     return hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
@@ -178,8 +181,14 @@ class Index:
 
 
 def get_index(cfg):
-    key = (cfg["rag"]["index"], _source_fingerprint(cfg))
+    key = (cfg["rag"]["index"], _source_fingerprint(cfg), cfg["rag"].get("top_k", 4))
     with _CACHE_LOCK:
         if key not in _CACHE:
+            # Evita retener todas las generaciones obsoletas tras actualizar el corpus.
+            for old in list(_CACHE):
+                if old[0] == key[0]:
+                    del _CACHE[old]
             _CACHE[key] = Index(cfg)
+            while len(_CACHE) > 8:
+                del _CACHE[next(iter(_CACHE))]
         return _CACHE[key]

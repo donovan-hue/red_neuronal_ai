@@ -38,7 +38,7 @@ Define la clave correspondiente (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY` o `GEMINI
 
 ## Seguridad y límites
 
-- Las operaciones de entrenamiento y evaluación requieren `NEXUS_ADMIN_TOKEN`.
+- Las operaciones de entrenamiento, evaluación y descarga de archivos de `runs/` requieren `NEXUS_ADMIN_TOKEN` en el encabezado `X-Nexus-Admin-Token`.
 - `/api/config` es de solo lectura; los cambios se realizan fuera del servidor.
 - El servicio limita tamaño y estructura de solicitudes.
 - La herramienta de ejecución de Python está **deshabilitada**. `python -I` no constituye un sandbox.
@@ -46,3 +46,26 @@ Define la clave correspondiente (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY` o `GEMINI
 - El corpus por defecto es literatura, no una base factual actualizada.
 
 La descripción de arquitectura está en `docs/ARCHITECTURE.md`; la hoja de ruta no representa capacidades ya implementadas.
+
+Las trazas de errores del chat se registran en el servidor y no se envían al cliente. Protege el acceso a los logs, que pueden contener datos sensibles. El límite de solicitudes en memoria es por proceso y no sustituye un limitador compartido en producción.
+
+El servidor limita por proceso el chat a 10 solicitudes por IP y minuto y a cuatro
+conversaciones simultáneas; las operaciones administrativas comparten un límite de
+10 solicitudes por IP y minuto. Los rechazos y acciones administrativas se registran
+sin tokens ni contenido de solicitudes. Estos controles no son globales entre procesos,
+no limitan el gasto y no reemplazan autenticación por usuario, un proxy HTTPS o un
+limitador compartido. Si se usa un proxy, configurar allí los límites por IP real;
+el servidor solo observa la dirección del cliente conectado directamente.
+
+### Memoria en el servidor web
+
+El chat web usa memoria temporal aislada por solicitud y no guarda hechos ni
+trayectorias entre peticiones. El historial enviado por el navegador mantiene el
+contexto de la conversación. Esta medida evita compartir datos entre usuarios
+mientras no exista autenticación individual. Las herramientas y programas de
+línea de comandos conservan su configuración de memoria independiente.
+
+El endpoint administrativo `GET /api/tasks` acepta `X-Nexus-Admin-Token` y
+muestra el estado de la última tarea de entrenamiento y evaluación en el proceso
+actual (`idle`, `running`, `succeeded`, `failed` o `timed_out`). Este estado es
+volátil: se pierde al reiniciar y no se comparte entre procesos.
