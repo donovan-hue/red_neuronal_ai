@@ -7,6 +7,8 @@ Este repositorio contiene **dos demostradores separados**:
 
 No comparten checkpoints ni rutas de API.
 
+La lista única de desarrollo pendiente está en [PENDIENTES.md](PENDIENTES.md).
+
 ## Demostrador clásico
 
 ```bash

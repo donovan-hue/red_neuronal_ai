@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import copy
+import auth
+import limits
 import hmac
 import json
 import os
@@ -97,12 +99,22 @@ def status():
 
 
 def _authorized(handler):
+    if os.environ.get("NEXUS_AUTH_FILE"):
+        return getattr(handler, "principal", {}).get("role") == "admin"
     expected = os.environ.get("NEXUS_ADMIN_TOKEN", "")
     supplied = handler.headers.get("X-Nexus-Admin-Token", "")
     return bool(expected) and hmac.compare_digest(supplied, expected)
 
 
 def _rate_allowed(address, limit):
+    db_path = os.environ.get("NEXUS_RATE_DB", "")
+    if db_path:
+        try:
+            return limits.allow_request(db_path, address, limit)
+        except limits.LimitStoreError:
+            _LOG.error("limit_store_unavailable")
+            # Fallar cerrado; nunca permitir tráfico si no puede evaluarse el límite.
+            return False
     now = time.monotonic()
     with _RATE_LOCK:
         # Elimina direcciones inactivas para evitar crecimiento indefinido.
@@ -164,11 +176,35 @@ class Handler(BaseHTTPRequestHandler):
             return None
         return target
 
+    def _authenticate_api(self, path):
+        auth_file = os.environ.get("NEXUS_AUTH_FILE", "")
+        if not path.startswith("/api/") or not auth_file:
+            return True
+        try:
+            self.principal = auth.authenticate(auth_file, self.headers.get("Authorization", ""))
+        except auth.AuthConfigError:
+            self._send(503, {"error": "configuración de autenticación no disponible"})
+            return False
+        if self.principal is None:
+            if not _rate_allowed((self.client_address[0], "auth"), 30):
+                self._send(429, {"error": "límite temporal de autenticación excedido"}, extra={"Retry-After": "60"})
+                return False
+            self._send(401, {"error": "credencial de usuario inválida", "code": "NEXUS_USER_AUTH_REQUIRED"},
+                       extra={"WWW-Authenticate": "Bearer"})
+            return False
+        return True
+
     def do_GET(self):
         path = self.path.split("?", 1)[0]
+        if not self._authenticate_api(path):
+            return
         if path == "/api/status":
             try:
-                self._send(200, status())
+                result = status()
+                if os.environ.get("NEXUS_AUTH_FILE"):
+                    result["auth_role"] = self.principal["role"]
+                    result["admin_enabled"] = self.principal["role"] == "admin"
+                self._send(200, result)
             except Exception as exc:
                 self._send(500, {"error": _safe_error(exc)})
             return
@@ -231,6 +267,8 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         path = self.path.split("?", 1)[0]
+        if not self._authenticate_api(path):
+            return
         if path in ("/api/train", "/api/eval"):
             if not _rate_allowed((self.client_address[0], "admin"), 10):
                 self._send(429, {"error": "límite temporal de solicitudes excedido"}, extra={"Retry-After": "60"})
@@ -406,12 +444,22 @@ def _run_task(name, argument):
             _TASK_RESULTS[name].update(state=state, finished_at=time.time(), returncode=returncode)
 
 
+def server_address(cfg):
+    port = int(os.environ.get("PORT", cfg["server"]["port"]))
+    if os.environ.get("NEXUS_PRIVATE_MODE") == "1":
+        path = os.environ.get("NEXUS_AUTH_FILE", "")
+        if not path or not auth.load_users(path):
+            raise RuntimeError("modo privado requiere NEXUS_AUTH_FILE con al menos un usuario")
+        return "127.0.0.1", port
+    return cfg["server"].get("host", "127.0.0.1"), port
+
+
 def main():
     (ROOT / "runs").mkdir(parents=True, exist_ok=True)
     cfg = load_cfg()
-    port = int(os.environ.get("PORT", cfg["server"]["port"]))
+    host, port = server_address(cfg)
     threading.Thread(target=boot, daemon=True).start()
-    server = ThreadingHTTPServer((cfg["server"].get("host", "0.0.0.0"), port), Handler)
+    server = ThreadingHTTPServer((host, port), Handler)
     server.daemon_threads = True
     print(f"NEXUS escuchando en puerto {port}", flush=True)
     server.serve_forever()

@@ -74,15 +74,29 @@ th:first-child,td:first-child{text-align:left;color:var(--dim);font-weight:500}
 <div class="card"><section><h2>Benchmark nexus-bench-v1</h2><div id="ev"><div class="note">Sin ejecutar. Pulsa "Correr benchmark".</div></div></section></div>
 <div class="card"><section><h2>Cómo piensa</h2><div class="note">
 1. <b>Plan</b>: clasifica la tarea (calcular / buscar / deducir).<br>
-2. <b>Acción</b>: delega la aritmética a la calculadora o a un intérprete Python aislado.<br>
+2. <b>Acción</b>: delega la aritmética a la calculadora; la ejecución de Python está deshabilitada.<br>
 3. <b>Observación</b>: lee el resultado real, no lo inventa.<br>
 4. <b>Autoconsistencia</b>: muestreos múltiples y voto; el desacuerdo baja la confianza.<br>
 5. <b>Verificador</b>: un pase crítico que puede forzar una corrección.<br>
-6. <b>Memoria</b>: guarda trayectorias correctas y las reutiliza como ejemplos.</div></section></div>
+6. <b>Memoria</b>: el chat web utiliza memoria temporal aislada por solicitud.</div></section></div>
 </aside></main>
 <script>
 const $=s=>document.querySelector(s),log=()=>$('#log');
-const HIST=[];let BUSY=false;
+const HIST=[];let BUSY=false, authRole=null;
+// Reintenta únicamente el 401 específico que el servidor emite antes de ejecutar la acción.
+async function authFetch(url,options={}) {
+  const perform=token=>{const headers=new Headers(options.headers||{});if(token)headers.set('Authorization','Bearer '+token);return fetch(url,{...options,headers});};
+  let token=sessionStorage.getItem('nexusUserToken')||'';
+  let response=await perform(token);
+  if(response.status===401){
+    const body=await response.clone().json().catch(()=>({}));
+    if(body.code==='NEXUS_USER_AUTH_REQUIRED'){
+      token=prompt('Clave de usuario NEXUS:')||'';
+      if(token){sessionStorage.setItem('nexusUserToken',token);response=await perform(token);}
+    }
+  }
+  return response;
+}
 const EX=["Calcula (17*23)+4**3 y dime el residuo de dividirlo entre 97","Resuelve 3x - 11 = 46","¿Cuantos km recorre un tren a 85 km/h en 6 h?","Suma las cifras de 483291 y halla el mcm con 24","Busca en el corpus quien es Dulcinea del Toboso","Ordena de menor a mayor: 4821, 931, 12004, 77"];
 $('#ex').innerHTML=EX.map(t=>`<b>${t.replace(/</g,'&lt;')}</b>`).join('');
 [...$('#ex').children].forEach(b=>b.onclick=()=>{$('#q').value=b.textContent;send();});
@@ -94,9 +108,9 @@ function send(){
   const ai=bub('ai','<div class="trace">planeando…</div><div class="body"><span class="cur"></span></div>');
   const tr=ai.querySelector('.trace'),bd=ai.querySelector('.body');tr.innerHTML='';
   let acc='',apiToken=sessionStorage.getItem('nexusApiToken')||'';
-  fetch('/api/chat',{method:'POST',headers:{'Content-Type':'application/json','X-Nexus-Api-Token':apiToken},
+  authFetch('/api/chat',{method:'POST',headers:{'Content-Type':'application/json','X-Nexus-Api-Token':apiToken},
     body:JSON.stringify({message:q,history:priorHistory})}).then(async r=>{
-    if(r.status===401){apiToken=prompt('Token de acceso NEXUS:')||'';if(apiToken)sessionStorage.setItem('nexusApiToken',apiToken);r=await fetch('/api/chat',{method:'POST',headers:{'Content-Type':'application/json','X-Nexus-Api-Token':apiToken},body:JSON.stringify({message:q,history:priorHistory})});}
+    if(r.status===401){apiToken=prompt('Token de acceso NEXUS:')||'';if(apiToken)sessionStorage.setItem('nexusApiToken',apiToken);r=await authFetch('/api/chat',{method:'POST',headers:{'Content-Type':'application/json','X-Nexus-Api-Token':apiToken},body:JSON.stringify({message:q,history:priorHistory})});}
     if(!r.ok){const e=await r.json().catch(()=>({error:r.statusText}));throw new Error(e.error||r.statusText);}
     const rd=r.body.getReader();const dec=new TextDecoder();let buf='';
     function pump(){return rd.read().then(({done,value})=>{
@@ -132,6 +146,7 @@ function draw(){const c=$('#loss'),g=c.getContext('2d');g.clearRect(0,0,c.width,
   g.stroke();g.fillStyle='#7b879c';g.font='11px ui-monospace,monospace';
   g.fillText('val '+v[v.length-1].toFixed(3),8,13);g.fillText('min '+mn.toFixed(3),c.width-88,13);}
 function renderSt(s){
+  authRole=s.auth_role||null;
   const t=s.train||{},last=t.last||{},bits=[];
   bits.push(['proveedor',md(String(s.provider||''))]);
   bits.push(['checkpoint',md(String(t.steps_done)+' pasos')]);
@@ -150,17 +165,17 @@ function renderSt(s){
       const x=r[a];return `<tr><td>${md(String(a))}</td><td><b>${(x.acc*100).toFixed(1)}%</b> <span style="color:#7b879c">${Number(x.ok)||0}/${Number(x.n)||0}</span></td><td style="width:88px"><div class="bar"><i style="width:${(x.acc*100).toFixed(0)}%"></i></div></td></tr>`;}).join('')+'</table>'+
       '<div class="note" style="margin-top:7px">semilla '+s.eval.seed+' · '+arms.length+' brazos · motor '+(s.eval.engine&&s.eval.engine.kind)+'</div>';}
 }
-function status(){fetch('/api/status').then(r=>r.json()).then(renderSt).catch(()=>{});}
+function status(){authFetch('/api/status').then(r=>r.json()).then(renderSt).catch(()=>{});}
 async function adminPost(path,payload){
   let token=sessionStorage.getItem('nexusAdminToken');
-  if(!token){token=prompt('Token administrativo NEXUS:');if(!token)return;sessionStorage.setItem('nexusAdminToken',token);}
-  const r=await fetch(path,{method:'POST',headers:{'Content-Type':'application/json','X-Nexus-Admin-Token':token},body:JSON.stringify(payload||{})});
+  if(!token && !authRole){token=prompt('Token administrativo NEXUS:');if(!token)return;sessionStorage.setItem('nexusAdminToken',token);}
+  const r=await authFetch(path,{method:'POST',headers:{'Content-Type':'application/json','X-Nexus-Admin-Token':token||''},body:JSON.stringify(payload||{})});
   if(!r.ok){sessionStorage.removeItem('nexusAdminToken');const e=await r.json().catch(()=>({error:r.statusText}));alert(e.error||'Operación rechazada');return false;}
   return true;
 }
 $('#b-eval').onclick=async()=>{if(await adminPost('/api/eval',{})){$('#ev').innerHTML='<div class="note">Evaluación iniciada.</div>';setTimeout(status,4000);}};
 $('#b-train').onclick=async()=>{if(await adminPost('/api/train',{additional_steps:300}))setTimeout(status,3000);};
-$('#b-cfg').onclick=()=>fetch('/api/config').then(r=>r.text()).then(t=>{
+$('#b-cfg').onclick=()=>authFetch('/api/config').then(r=>r.text()).then(t=>{
   $('#ev').innerHTML='<pre style="white-space:pre-wrap;font-size:11px;max-height:260px;overflow:auto;margin:0">'+md(t)+'</pre>';});
 status();setInterval(status,8000);
 </script></body></html>

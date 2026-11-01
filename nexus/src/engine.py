@@ -148,8 +148,23 @@ class APIEngine:
 
     def complete(self, prompt, max_new=600, temperature=0.4, top_k=None, top_p=None,
                  stop=None, messages=None):
+        if os.environ.get("NEXUS_PRIVATE_MODE") == "1":
+            raise RuntimeError("proveedores externos deshabilitados en modo privado")
         msgs = messages or self._messages_from_prompt(prompt)
         url, body, hdr = self._payload(msgs, max_new, temperature, stop=stop)
+        daily_limit = os.environ.get("NEXUS_API_DAILY_CALL_LIMIT", "")
+        if daily_limit:
+            import limits
+            db = os.environ.get("NEXUS_RATE_DB", "")
+            try:
+                limit = int(daily_limit)
+                if not db or not 1 <= limit <= 1_000_000:
+                    raise ValueError("configuración inválida")
+                permitted = limits.reserve_daily_call(db, limit)
+            except (ValueError, limits.LimitStoreError):
+                raise RuntimeError("cuota diaria no disponible; solicitud bloqueada") from None
+            if not permitted:
+                raise RuntimeError("cuota diaria de llamadas al proveedor agotada")
         r = self.httpx.post(url, json={k: v for k, v in body.items() if v is not None},
                             headers=hdr, timeout=120)
         r.raise_for_status()
@@ -179,7 +194,7 @@ class APIEngine:
 
 def make_engine(cfg, force=None):
     """auto: API si hay clave, si no motor local entrenado aqui."""
-    which = force or cfg.get("provider", "auto")
+    which = "local" if os.environ.get("NEXUS_PRIVATE_MODE") == "1" else (force or cfg.get("provider", "auto"))
     if which != "local":
         try:
             return APIEngine(cfg, None if which == "auto" else which)
