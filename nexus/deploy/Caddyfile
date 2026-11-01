@@ -1,0 +1,6 @@
+# Exporta NEXUS_DOMAIN con un dominio que apunte a este servidor.
+# La API debe escuchar únicamente en 127.0.0.1:8080.
+{$NEXUS_DOMAIN} {
+    encode gzip
+    reverse_proxy 127.0.0.1:8080
+}

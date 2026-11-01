@@ -7,6 +7,8 @@ Este repositorio contiene **dos demostradores separados**:
 
 No comparten checkpoints ni rutas de API.
 
+La lista única de desarrollo pendiente está en [PENDIENTES.md](PENDIENTES.md).
+
 ## Demostrador clásico
 
 ```bash
@@ -18,7 +20,7 @@ python interactuar.py
 
 El checkpoint NPZ se carga con `allow_pickle=False`. No se admiten checkpoints pickle.
 
-API: `POST /predecir`, `POST /entrenar` y `GET /health`. Los cuerpos JSON se validan y el entrenamiento tiene límites de tamaño. `POST /entrenar` requiere `API_TRAIN_TOKEN` y el header `X-API-Train-Token`.
+API: `POST /predecir` (requiere `x1` y `x2`), `POST /entrenar` y `GET /health`. Los cuerpos JSON se validan y el entrenamiento tiene límites de tamaño. `POST /entrenar` requiere `API_TRAIN_TOKEN` y el header `X-API-Train-Token`.
 
 ## NEXUS
 
@@ -50,3 +52,22 @@ python3 nexus_single.py serve 8080
 ```
 
 Abre `http://127.0.0.1:8080`. Esta UI es una conversación guionizada de demostración, con avatar SVG local; no envía los mensajes a una API. El servidor se limita a `127.0.0.1` por defecto.
+
+El entrenamiento de la API clásica prepara una copia y solo reemplaza el modelo
+activo después de guardar el checkpoint correctamente. Los bloqueos son por
+proceso: usa un único worker si habilitas entrenamiento; varios workers no
+sincronizan automáticamente sus modelos.
+
+### Entrenamiento y predicción por lotes
+
+`POST /predecir/lote` recibe `{"X": [[0, 1], [1, 0]]}` y devuelve
+`predicciones` y `redondeado` para hasta 500 filas. `POST /entrenar` devuelve
+`metricas` con la pérdida cuadrática media, precisión binaria y épocas ejecutadas.
+Opcionalmente acepta `validation: {"X": [...], "y": [...]}` y `patience` para
+detención temprana; cuando se proporcionan datos de validación se restaura el
+modelo de la época con menor pérdida de validación. Los conjuntos deben ser
+independientes; el servidor no los divide automáticamente.
+
+Los gradientes se normalizan por el tamaño del lote, por lo que la tasa de
+aprendizaje tiene una escala diferente a la de versiones anteriores. El ejemplo
+XOR usa `lr=0.4` para conservar la convergencia con 10 000 épocas.
